@@ -3,7 +3,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.database import engine, Base
-from app.routers import users, medications, health, medication_logs, reports, events, voice
+from app.routers import users, medications, health, medication_logs, reports, events, voice, caregiver
 from app.scheduler import start_scheduler, stop_scheduler
 
 # Create database tables
@@ -43,6 +43,7 @@ app.include_router(medication_logs.router)
 app.include_router(reports.router)
 app.include_router(events.router)
 app.include_router(voice.router)
+app.include_router(caregiver.router)
 
 
 @app.get("/")
