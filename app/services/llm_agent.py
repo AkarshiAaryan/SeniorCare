@@ -39,8 +39,14 @@ CRITICAL RULES:
 """
 
 
+def is_valid_key(key: str) -> bool:
+    return bool(key and key.strip() and not key.startswith("your_"))
+
+
 class LLMAgentService:
     def __init__(self):
+        self.gemini_key = settings.GEMINI_API_KEY
+        self.gemini_model = settings.GEMINI_MODEL
         self.openai_key = settings.OPENAI_API_KEY
         self.groq_key = settings.GROQ_API_KEY
         self.model = settings.LLM_MODEL
@@ -78,8 +84,29 @@ class LLMAgentService:
 
         full_messages = [{"role": "system", "content": system_instruction}] + messages
 
-        # 1. Try Groq API
-        if self.groq_key:
+        # 1. Try Gemini API (via Google OpenAI-compatible endpoint)
+        if is_valid_key(self.gemini_key):
+            try:
+                headers = {
+                    "Authorization": f"Bearer {self.gemini_key}",
+                    "Content-Type": "application/json"
+                }
+                payload = {
+                    "model": self.gemini_model,
+                    "messages": full_messages,
+                    "temperature": 0.7,
+                    "max_tokens": 150
+                }
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    res = await client.post("https://generativelanguage.googleapis.com/v1beta/openai/chat/completions", headers=headers, json=payload)
+                    if res.status_code == 200:
+                        content = res.json()["choices"][0]["message"]["content"].strip()
+                        return content
+            except Exception as e:
+                logger.error(f"Gemini LLM generation error: {e}")
+
+        # 2. Try Groq API
+        if is_valid_key(self.groq_key):
             try:
                 headers = {
                     "Authorization": f"Bearer {self.groq_key}",
@@ -99,8 +126,8 @@ class LLMAgentService:
             except Exception as e:
                 logger.error(f"Groq LLM generation error: {e}")
 
-        # 2. Try OpenAI API
-        if self.openai_key:
+        # 3. Try OpenAI API
+        if is_valid_key(self.openai_key):
             try:
                 headers = {
                     "Authorization": f"Bearer {self.openai_key}",
@@ -120,7 +147,7 @@ class LLMAgentService:
             except Exception as e:
                 logger.error(f"OpenAI LLM generation error: {e}")
 
-        # 3. Fallback empathetic response engine for offline / testing mode
+        # 4. Fallback empathetic response engine for offline / testing mode
         last_user_msg = ""
         for m in reversed(messages):
             if m.get("role") == "user":

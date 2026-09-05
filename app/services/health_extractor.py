@@ -31,8 +31,14 @@ Output only raw JSON without backticks or markdown formatting.
 """
 
 
+def is_valid_key(key: str) -> bool:
+    return bool(key and key.strip() and not key.startswith("your_"))
+
+
 class HealthExtractorService:
     def __init__(self):
+        self.gemini_key = settings.GEMINI_API_KEY
+        self.gemini_model = settings.GEMINI_MODEL
         self.openai_key = settings.OPENAI_API_KEY
         self.groq_key = settings.GROQ_API_KEY
 
@@ -54,8 +60,32 @@ class HealthExtractorService:
 
         prompt_user = f"Known medications: {known_medications or []}\n\nTranscript:\n{transcript}"
 
-        # 1. Try Groq API JSON extraction
-        if self.groq_key:
+        # 1. Try Gemini API JSON extraction
+        if is_valid_key(self.gemini_key):
+            try:
+                headers = {
+                    "Authorization": f"Bearer {self.gemini_key}",
+                    "Content-Type": "application/json"
+                }
+                payload = {
+                    "model": self.gemini_model,
+                    "messages": [
+                        {"role": "system", "content": EXTRACTION_SYSTEM_PROMPT},
+                        {"role": "user", "content": prompt_user}
+                    ],
+                    "response_format": {"type": "json_object"},
+                    "temperature": 0.1
+                }
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    res = await client.post("https://generativelanguage.googleapis.com/v1beta/openai/chat/completions", headers=headers, json=payload)
+                    if res.status_code == 200:
+                        content = res.json()["choices"][0]["message"]["content"]
+                        return json.loads(content)
+            except Exception as e:
+                logger.error(f"Gemini Extraction error: {e}")
+
+        # 2. Try Groq API JSON extraction
+        if is_valid_key(self.groq_key):
             try:
                 headers = {
                     "Authorization": f"Bearer {self.groq_key}",
@@ -78,8 +108,8 @@ class HealthExtractorService:
             except Exception as e:
                 logger.error(f"Groq Extraction error: {e}")
 
-        # 2. Try OpenAI API JSON extraction
-        if self.openai_key:
+        # 3. Try OpenAI API JSON extraction
+        if is_valid_key(self.openai_key):
             try:
                 headers = {
                     "Authorization": f"Bearer {self.openai_key}",
@@ -102,7 +132,7 @@ class HealthExtractorService:
             except Exception as e:
                 logger.error(f"OpenAI Extraction error: {e}")
 
-        # 3. Rule-based heuristic extraction fallback
+        # 4. Rule-based heuristic extraction fallback
         text_lower = transcript.lower()
         
         # Mood
