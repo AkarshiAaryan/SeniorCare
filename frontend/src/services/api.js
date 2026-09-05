@@ -9,10 +9,41 @@ export async function checkServerHealth() {
   }
 }
 
+export async function getCaregiverList() {
+  const res = await fetch(`${API_BASE}/caregiver/list`);
+  if (!res.ok) return [];
+  return res.json();
+}
+
+export async function caregiverLogin(name, contact) {
+  const res = await fetch(`${API_BASE}/caregiver/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, contact })
+  });
+  if (!res.ok) throw new Error('Login failed');
+  return res.json();
+}
+
+export async function getCaregiverPatients(caregiverId) {
+  const res = await fetch(`${API_BASE}/caregiver/patients/${caregiverId}`);
+  if (!res.ok) return [];
+  return res.json();
+}
+
+export async function createPatient(patientData) {
+  const res = await fetch(`${API_BASE}/users`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patientData)
+  });
+  if (!res.ok) throw new Error('Failed to create patient');
+  return res.json();
+}
+
 export async function getUsers() {
   const res = await fetch(`${API_BASE}/users/1`);
   if (!res.ok) {
-    // If user 1 doesn't exist, create a default user for instant testability
     const createRes = await fetch(`${API_BASE}/users`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

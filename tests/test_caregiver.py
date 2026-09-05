@@ -1,3 +1,22 @@
+def test_caregiver_login_and_list(client):
+    # 1. Login new caregiver
+    login_res = client.post("/caregiver/login", json={
+        "name": "Dr. Sarah Miller",
+        "contact": "+1-555-4321"
+    })
+    assert login_res.status_code == 200
+    cg_data = login_res.json()
+    assert cg_data["name"] == "Dr. Sarah Miller"
+    assert "id" in cg_data
+
+    # 2. List caregivers
+    list_res = client.get("/caregiver/list")
+    assert list_res.status_code == 200
+    cg_list = list_res.json()
+    assert len(cg_list) >= 1
+    assert any(c["name"] == "Dr. Sarah Miller" for c in cg_list)
+
+
 def test_panic_alert_trigger_and_resolve(client):
     # 1. Create patient
     u_res = client.post("/users", json={"name": "Evelyn Vance", "age": 83})
@@ -89,3 +108,4 @@ def test_caregiver_patients_list(client):
     assert patients_res.status_code == 200
     patients = patients_res.json()
     assert len(patients) == 2
+    assert patients[0]["name"] in ["Patient One", "Patient Two"]
