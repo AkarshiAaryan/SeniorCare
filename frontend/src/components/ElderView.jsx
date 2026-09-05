@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   Mic, 
   AlertTriangle, 
@@ -10,14 +10,18 @@ import {
   Volume2, 
   Check, 
   ShieldAlert,
-  Calendar
+  Calendar,
+  Radio,
+  Sparkles
 } from 'lucide-react';
 import { 
   getMedications, 
   logMedication, 
   triggerPanicAlert, 
   getDailyReport, 
-  playRimeAudio 
+  playRimeAudio,
+  checkProactiveVoiceOutreach,
+  triggerProactivePrompt
 } from '../services/api';
 import VoiceModal from './VoiceModal';
 
@@ -27,6 +31,11 @@ export default function ElderView({ user, onRefresh }) {
   const [isVoiceOpen, setIsVoiceOpen] = useState(false);
   const [panicSent, setPanicSent] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [activeOutreach, setActiveOutreach] = useState(null);
+  const [initialAssistantText, setInitialAssistantText] = useState(null);
+  const [initialAudioBase64, setInitialAudioBase64] = useState(null);
+  const [isTriggeringProactive, setIsTriggeringProactive] = useState(false);
+  const handledEventIdsRef = useRef(new Set());
 
   const loadData = async () => {
     if (!user) return;
@@ -44,9 +53,58 @@ export default function ElderView({ user, onRefresh }) {
     }
   };
 
+  // Poll for proactive check-in / medication voice prompts
+  useEffect(() => {
+    if (!user) return;
+
+    const pollProactive = async () => {
+      try {
+        const outreach = await checkProactiveVoiceOutreach(user.id);
+        if (outreach && outreach.prompt_needed && outreach.event_id) {
+          if (!handledEventIdsRef.current.has(outreach.event_id)) {
+            handledEventIdsRef.current.add(outreach.event_id);
+            setActiveOutreach(outreach);
+            setInitialAssistantText(outreach.spoken_text);
+            setInitialAudioBase64(outreach.audio_base64);
+            setIsVoiceOpen(true);
+            if (outreach.audio_base64) {
+              playRimeAudio(outreach.audio_base64).catch(e => console.warn('Autoplay audio:', e));
+            }
+          }
+        }
+      } catch (err) {
+        console.warn('Proactive poll note:', err);
+      }
+    };
+
+    pollProactive();
+    const intervalId = setInterval(pollProactive, 20000);
+    return () => clearInterval(intervalId);
+  }, [user]);
+
   useEffect(() => {
     loadData();
   }, [user]);
+
+  const handleSimulateCheckIn = async (reasonType = 'CHECK_IN_DUE', details = '3-Hour Daytime Wellness Inquiry') => {
+    try {
+      setIsTriggeringProactive(true);
+      const res = await triggerProactivePrompt(user.id, reasonType, details);
+      if (res && res.spoken_text) {
+        setActiveOutreach(res);
+        setInitialAssistantText(res.spoken_text);
+        setInitialAudioBase64(res.audio_base64);
+        setIsVoiceOpen(true);
+        if (res.audio_base64) {
+          playRimeAudio(res.audio_base64).catch(e => console.warn('Simulation audio:', e));
+        }
+      }
+    } catch (err) {
+      console.error('Simulate check-in error:', err);
+    } finally {
+      setIsTriggeringProactive(false);
+    }
+  };
 
   const handleQuickLog = async (medicationId, scheduledTime) => {
     try {
@@ -102,6 +160,94 @@ export default function ElderView({ user, onRefresh }) {
           </div>
           <span>Talk to Elena</span>
         </button>
+      </div>
+
+      {/* Proactive Elena Active Outreach Banner */}
+      {activeOutreach && (
+        <div className="bg-gradient-to-r from-teal-600 to-emerald-600 text-white p-6 rounded-3xl shadow-xl flex flex-col md:flex-row items-center justify-between gap-4 border-2 border-teal-300 animate-fade-in">
+          <div className="flex items-center gap-4">
+            <div className="p-3 bg-white/20 rounded-2xl animate-pulse">
+              <Volume2 className="w-8 h-8 text-white" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="px-2.5 py-0.5 bg-white/20 rounded-full text-xs font-bold uppercase tracking-wider">
+                  Elena Proactive Check-In
+                </span>
+                <span className="text-xs text-teal-100 font-medium">Automatic Voice Care</span>
+              </div>
+              <p className="text-lg font-bold mt-1">
+                "{activeOutreach.spoken_text}"
+              </p>
+            </div>
+          </div>
+          <button
+            onClick={() => setIsVoiceOpen(true)}
+            className="px-6 py-3 bg-white text-emerald-800 hover:bg-emerald-50 rounded-xl font-black text-base shadow-md flex items-center gap-2 whitespace-nowrap"
+          >
+            <Mic className="w-5 h-5" />
+            <span>Respond to Elena</span>
+          </button>
+        </div>
+      )}
+
+      {/* Proactive 3-Hour Scheduler Status & Interactive Simulation */}
+      <div className="bg-gradient-to-br from-slate-900 to-teal-950 text-white rounded-3xl p-6 md:p-8 shadow-xl border border-teal-800/40 space-y-6">
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+          <div className="space-y-1">
+            <div className="flex items-center gap-2">
+              <Radio className="w-5 h-5 text-teal-400 animate-pulse" />
+              <h3 className="text-xl md:text-2xl font-black text-white">
+                Elena Proactive 3-Hour & Medication Voice Scheduler
+              </h3>
+            </div>
+            <p className="text-sm text-teal-200/90 font-medium">
+              Elena automatically speaks aloud and checks in with you every 3 hours during daytime and at your medication times.
+            </p>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-3">
+            <button
+              onClick={() => handleSimulateCheckIn('CHECK_IN_DUE', '3-Hour Daytime Wellness Check')}
+              disabled={isTriggeringProactive}
+              className="px-4 py-2.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white rounded-xl font-bold text-sm shadow-md flex items-center gap-2 transition cursor-pointer"
+            >
+              <Sparkles className="w-4 h-4" />
+              <span>Simulate 3-Hr Check-in</span>
+            </button>
+            <button
+              onClick={() => handleSimulateCheckIn('MEDICATION_DUE', 'Blood Pressure Tablet 10mg')}
+              disabled={isTriggeringProactive}
+              className="px-4 py-2.5 bg-teal-600 hover:bg-teal-500 disabled:opacity-50 text-white rounded-xl font-bold text-sm shadow-md flex items-center gap-2 transition cursor-pointer"
+            >
+              <Pill className="w-4 h-4" />
+              <span>Simulate Med Reminder</span>
+            </button>
+          </div>
+        </div>
+
+        {/* 3-Hour Schedule Timeline Badges */}
+        <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 pt-2">
+          {[
+            { time: '08:00', label: 'Morning Check-in', desc: 'Sleep & breakfast' },
+            { time: '11:00', label: 'Midday Check-in', desc: 'Energy & water' },
+            { time: '14:00', label: 'Afternoon Check-in', desc: 'Lunch & rest' },
+            { time: '17:00', label: 'Evening Check-in', desc: 'Activity & dinner' },
+            { time: '20:00', label: 'Night Check-in', desc: 'Night meds & comfort' },
+          ].map((slot, idx) => (
+            <div 
+              key={idx} 
+              className="p-3 bg-teal-900/40 border border-teal-700/50 rounded-2xl flex flex-col items-center text-center space-y-1"
+            >
+              <span className="text-xs font-bold text-teal-400 flex items-center gap-1">
+                <Clock className="w-3.5 h-3.5" />
+                {slot.time}
+              </span>
+              <span className="text-sm font-black text-white">{slot.label}</span>
+              <span className="text-xs text-teal-200/70">{slot.desc}</span>
+            </div>
+          ))}
+        </div>
       </div>
 
       {/* Panic Alert Confirmation Banner */}
@@ -252,9 +398,16 @@ export default function ElderView({ user, onRefresh }) {
       {/* Voice Assistant Modal */}
       <VoiceModal
         isOpen={isVoiceOpen}
-        onClose={() => setIsVoiceOpen(false)}
+        onClose={() => {
+          setIsVoiceOpen(false);
+          setInitialAssistantText(null);
+          setInitialAudioBase64(null);
+          setActiveOutreach(null);
+        }}
         user={user}
         onUpdate={loadData}
+        initialAssistantText={initialAssistantText}
+        initialAudioBase64={initialAudioBase64}
       />
     </div>
   );

@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Mic, MicOff, Volume2, X, Send, Sparkles, AlertCircle } from 'lucide-react';
 import { processAudioTurn, processVoiceTurn, playRimeAudio } from '../services/api';
 
-export default function VoiceModal({ isOpen, onClose, user, onUpdate }) {
+export default function VoiceModal({ isOpen, onClose, user, onUpdate, initialAssistantText, initialAudioBase64 }) {
   const [isRecording, setIsRecording] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [transcript, setTranscript] = useState('');
@@ -16,11 +16,22 @@ export default function VoiceModal({ isOpen, onClose, user, onUpdate }) {
 
   useEffect(() => {
     if (isOpen) {
-      setAssistantText(`Hello ${user?.name || 'Friend'}! I am Elena. How are you feeling today?`);
+      if (initialAssistantText) {
+        setAssistantText(initialAssistantText);
+        setHistory([{ role: 'assistant', content: initialAssistantText }]);
+        setStatusMessage('Elena is speaking to you. Tap mic when ready to respond.');
+        if (initialAudioBase64) {
+          playRimeAudio(initialAudioBase64).catch(e => console.warn('Audio auto-play note:', e));
+        }
+      } else {
+        const welcome = `Hello ${user?.name || 'Friend'}! I am Elena. How are you feeling today?`;
+        setAssistantText(welcome);
+        setHistory([{ role: 'assistant', content: welcome }]);
+        setStatusMessage('Tap the microphone to speak');
+      }
       setTranscript('');
-      setStatusMessage('Tap the microphone to speak');
     }
-  }, [isOpen, user]);
+  }, [isOpen, user, initialAssistantText, initialAudioBase64]);
 
   if (!isOpen) return null;
 

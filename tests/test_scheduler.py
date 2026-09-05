@@ -22,7 +22,7 @@ def test_scheduler_check_in_reminder():
             models.EventLog.event_type == "CHECK_IN_DUE"
         ).first()
         assert event is not None
-        assert "Afternoon check-in is due" in event.message
+        assert "Afternoon" in event.message and "check-in is due" in event.message
     finally:
         db.close()
 

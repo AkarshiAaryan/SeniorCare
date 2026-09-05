@@ -11,6 +11,33 @@ router = APIRouter(prefix="/caregiver", tags=["Caregiver Dashboard & Analytics"]
 
 
 # --- Schemas ---
+class CaregiverLoginRequest(BaseModel):
+    name: str
+    contact: str
+
+
+class CaregiverResponse(BaseModel):
+    id: int
+    name: str
+    contact: str
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class PatientSummary(BaseModel):
+    id: int
+    name: str
+    age: int
+    preferred_language: str
+    medications_count: int
+    pending_alerts_count: int
+    has_panic_alert: bool
+    latest_mood: str
+    latest_sleep: str
+    latest_pain: str
+    adherence_rate: float
+
+
 class PanicRequest(BaseModel):
     user_id: int
     note: Optional[str] = "Elderly user pressed the emergency panic button"
@@ -46,6 +73,113 @@ class AnalyticsResponse(BaseModel):
 
 
 # --- Endpoints ---
+
+@router.get("/list", response_model=List[CaregiverResponse])
+def list_caregivers(db: Session = Depends(get_db)):
+    """
+    List all registered caregivers for sign-in or quick switching.
+    """
+    caregivers = db.query(models.Caregiver).all()
+    if not caregivers:
+        # Create a default caregiver for immediate demo usability
+        demo_cg = models.Caregiver(name="Sarah Nurse", contact="+1-555-0199")
+        db.add(demo_cg)
+        db.commit()
+        db.refresh(demo_cg)
+        caregivers = [demo_cg]
+    return caregivers
+
+
+@router.post("/login", response_model=CaregiverResponse)
+def caregiver_login(req: CaregiverLoginRequest, db: Session = Depends(get_db)):
+    """
+    Caregiver login or registration by name and contact.
+    """
+    cg = db.query(models.Caregiver).filter(
+        (models.Caregiver.contact == req.contact) | (models.Caregiver.name == req.name)
+    ).first()
+
+    if not cg:
+        cg = models.Caregiver(name=req.name, contact=req.contact)
+        db.add(cg)
+        db.commit()
+        db.refresh(cg)
+
+    return cg
+
+
+@router.get("/patients/{caregiver_id}", response_model=List[PatientSummary])
+def get_caregiver_patients(caregiver_id: int, db: Session = Depends(get_db)):
+    """
+    Get rich overview of all elderly patients assigned to a caregiver.
+    """
+    caregiver = db.query(models.Caregiver).filter(models.Caregiver.id == caregiver_id).first()
+    if not caregiver:
+        raise HTTPException(status_code=404, detail="Caregiver not found")
+
+    # If caregiver has no assigned users, check if there are unassigned users and assign one
+    if not caregiver.users:
+        all_users = db.query(models.User).all()
+        if all_users:
+            for u in all_users:
+                u.caregiver_id = caregiver_id
+            db.commit()
+            db.refresh(caregiver)
+        else:
+            # Create a default patient
+            default_user = models.User(
+                name="Arthur Pendelton",
+                age=82,
+                preferred_language="English",
+                caregiver_id=caregiver.id
+            )
+            db.add(default_user)
+            db.commit()
+            db.refresh(caregiver)
+
+    result = []
+    for user in caregiver.users:
+        # 1. Pending alerts
+        pending_events = db.query(models.EventLog).filter(
+            models.EventLog.user_id == user.id,
+            models.EventLog.processed == False
+        ).all()
+        has_panic = any(ev.event_type == "PANIC_ALERT" for ev in pending_events)
+
+        # 2. Latest Health record
+        latest_hr = (
+            db.query(models.HealthRecord)
+            .filter(models.HealthRecord.user_id == user.id)
+            .order_by(models.HealthRecord.timestamp.desc())
+            .first()
+        )
+
+        # 3. Adherence rate
+        med_logs = (
+            db.query(models.MedicationLog)
+            .join(models.Medication)
+            .filter(models.Medication.user_id == user.id)
+            .all()
+        )
+        total_taken = sum(1 for log in med_logs if log.taken)
+        adherence = round((total_taken / len(med_logs) * 100), 1) if med_logs else 100.0
+
+        result.append(PatientSummary(
+            id=user.id,
+            name=user.name,
+            age=user.age,
+            preferred_language=user.preferred_language or "English",
+            medications_count=len(user.medications),
+            pending_alerts_count=len(pending_events),
+            has_panic_alert=has_panic,
+            latest_mood=latest_hr.mood if latest_hr and latest_hr.mood else "Calm",
+            latest_sleep=latest_hr.sleep if latest_hr and latest_hr.sleep else "Good",
+            latest_pain=latest_hr.pain if latest_hr and latest_hr.pain else "None reported",
+            adherence_rate=adherence
+        ))
+
+    return result
+
 
 @router.post("/panic", response_model=AlertResponse, status_code=status.HTTP_201_CREATED)
 def trigger_panic_alert(req: PanicRequest, db: Session = Depends(get_db)):
@@ -128,7 +262,6 @@ def get_caregiver_analytics(user_id: int, days: int = 7, db: Session = Depends(g
         missed_count = sum(1 for log in day_logs if not log.taken)
         scheduled_est = max(len(day_logs), sum(len(m.schedules) for m in user_meds))
         
-        # If no log yet for today, show pending
         pending_count = max(0, scheduled_est - (taken_count + missed_count))
 
         adherence_trend.append({
@@ -147,7 +280,6 @@ def get_caregiver_analytics(user_id: int, days: int = 7, db: Session = Depends(g
         .all()
     )
 
-    # Sleep score mapping: good=3, normal/fair=2, poor=1
     sleep_score_map = {"good": 3, "fair": 2, "normal": 2, "poor": 1, "interrupted": 1}
     sleep_trend = []
     for i in range(days):
@@ -225,31 +357,3 @@ def get_caregiver_analytics(user_id: int, days: int = 7, db: Session = Depends(g
         pain_logs=pain_logs,
         active_alerts=active_alerts
     )
-
-
-@router.get("/patients/{caregiver_id}")
-def get_caregiver_patients(caregiver_id: int, db: Session = Depends(get_db)):
-    """
-    Get all patients assigned to a caregiver with live status indicators.
-    """
-    caregiver = db.query(models.Caregiver).filter(models.Caregiver.id == caregiver_id).first()
-    if not caregiver:
-        raise HTTPException(status_code=404, detail="Caregiver not found")
-
-    result = []
-    for user in caregiver.users:
-        pending_alerts = db.query(models.EventLog).filter(
-            models.EventLog.user_id == user.id,
-            models.EventLog.processed == False
-        ).count()
-
-        med_count = len(user.medications)
-        result.append({
-            "id": user.id,
-            "name": user.name,
-            "age": user.age,
-            "preferred_language": user.preferred_language,
-            "medications_count": med_count,
-            "pending_alerts_count": pending_alerts
-        })
-    return result

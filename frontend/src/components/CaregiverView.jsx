@@ -13,7 +13,9 @@ import {
   Moon,
   TrendingUp,
   FileText,
-  User
+  User,
+  ArrowLeft,
+  LogOut
 } from 'lucide-react';
 import {
   ResponsiveContainer,
@@ -34,16 +36,22 @@ import {
   getCaregiverAnalytics,
   resolveAlert,
   addMedication,
-  getMedications,
   getDailyReport
 } from '../services/api';
+import CaregiverAuth from './CaregiverAuth';
+import CaregiverPatientList from './CaregiverPatientList';
 
 const MOOD_COLORS = ['#10b981', '#3b82f6', '#f59e0b', '#ef4444', '#8b5cf6'];
 
-export default function CaregiverView({ user, onRefresh }) {
+export default function CaregiverView({ onRefresh }) {
+  const [currentCaregiver, setCurrentCaregiver] = useState(() => {
+    const saved = localStorage.getItem('seniorcare_caregiver');
+    return saved ? JSON.parse(saved) : null;
+  });
+  const [selectedPatient, setSelectedPatient] = useState(null);
   const [analytics, setAnalytics] = useState(null);
   const [dailyReport, setDailyReport] = useState(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
   const [isAddMedOpen, setIsAddMedOpen] = useState(false);
   const [newMed, setNewMed] = useState({
     name: '',
@@ -52,13 +60,25 @@ export default function CaregiverView({ user, onRefresh }) {
     times: '08:00, 20:00'
   });
 
-  const loadData = async () => {
-    if (!user) return;
+  const handleLoginSuccess = (cg) => {
+    setCurrentCaregiver(cg);
+    localStorage.setItem('seniorcare_caregiver', JSON.stringify(cg));
+    setSelectedPatient(null);
+  };
+
+  const handleLogout = () => {
+    setCurrentCaregiver(null);
+    setSelectedPatient(null);
+    localStorage.removeItem('seniorcare_caregiver');
+  };
+
+  const loadPatientAnalytics = async (patientId) => {
+    if (!patientId) return;
     setLoading(true);
     try {
       const [analyticsData, reportData] = await Promise.all([
-        getCaregiverAnalytics(user.id, 7),
-        getDailyReport(user.id)
+        getCaregiverAnalytics(patientId, 7),
+        getDailyReport(patientId)
       ]);
       setAnalytics(analyticsData);
       setDailyReport(reportData);
@@ -70,13 +90,17 @@ export default function CaregiverView({ user, onRefresh }) {
   };
 
   useEffect(() => {
-    loadData();
-  }, [user]);
+    if (selectedPatient) {
+      loadPatientAnalytics(selectedPatient.id);
+    }
+  }, [selectedPatient]);
 
   const handleResolveAlert = async (alertId) => {
     try {
       await resolveAlert(alertId);
-      await loadData();
+      if (selectedPatient) {
+        await loadPatientAnalytics(selectedPatient.id);
+      }
       if (onRefresh) onRefresh();
     } catch (err) {
       console.error('Error resolving alert:', err);
@@ -85,7 +109,7 @@ export default function CaregiverView({ user, onRefresh }) {
 
   const handleAddMedication = async (e) => {
     e.preventDefault();
-    if (!newMed.name || !newMed.dosage) return;
+    if (!newMed.name || !newMed.dosage || !selectedPatient) return;
 
     try {
       const timesArray = newMed.times
@@ -94,7 +118,7 @@ export default function CaregiverView({ user, onRefresh }) {
         .filter(Boolean);
 
       await addMedication({
-        user_id: user.id,
+        user_id: selectedPatient.id,
         name: newMed.name,
         dosage: newMed.dosage,
         instructions: newMed.instructions,
@@ -103,59 +127,85 @@ export default function CaregiverView({ user, onRefresh }) {
 
       setIsAddMedOpen(false);
       setNewMed({ name: '', dosage: '', instructions: '', times: '08:00, 20:00' });
-      await loadData();
+      await loadPatientAnalytics(selectedPatient.id);
       if (onRefresh) onRefresh();
     } catch (err) {
       console.error('Failed to add medication:', err);
     }
   };
 
-  if (loading && !analytics) {
+  // State 1: Caregiver Not Authenticated -> Show Sign-In View
+  if (!currentCaregiver) {
+    return <CaregiverAuth onLoginSuccess={handleLoginSuccess} />;
+  }
+
+  // State 2: Caregiver Signed In but No Patient Selected -> Show Elders Roster
+  if (!selectedPatient) {
     return (
-      <div className="flex items-center justify-center min-h-[400px]">
-        <div className="flex items-center gap-3 text-slate-500 font-bold text-lg">
-          <RefreshCw className="w-6 h-6 animate-spin text-emerald-600" />
-          <span>Loading Caregiver Dashboard...</span>
-        </div>
-      </div>
+      <CaregiverPatientList
+        caregiver={currentCaregiver}
+        onSelectPatient={(patient) => setSelectedPatient(patient)}
+        onLogout={handleLogout}
+      />
     );
   }
 
+  // State 3: Patient Selected -> Show Full Detailed Analytics Page
   return (
-    <div className="max-w-7xl mx-auto px-4 py-8 space-y-8">
-      {/* Dashboard Top Header */}
+    <div className="max-w-7xl mx-auto px-4 py-8 space-y-8 animate-in fade-in">
+      {/* Top Navigation & Back Bar */}
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 bg-white p-6 rounded-3xl shadow-sm border border-slate-100">
         <div className="flex items-center gap-4">
-          <div className="w-14 h-14 rounded-2xl bg-indigo-50 border border-indigo-100 flex items-center justify-center text-indigo-600 font-bold text-xl">
-            <User className="w-7 h-7" />
-          </div>
-          <div>
-            <div className="flex items-center gap-2">
-              <h1 className="text-2xl font-bold text-slate-900">{analytics?.user_name || 'Patient'}</h1>
-              <span className="px-2.5 py-0.5 bg-slate-100 text-slate-700 font-bold text-xs rounded-full">
-                Age: {analytics?.age || 80}
-              </span>
+          <button
+            onClick={() => setSelectedPatient(null)}
+            className="p-3 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-2xl transition flex items-center gap-2 font-bold text-sm cursor-pointer"
+            title="Back to Roster"
+          >
+            <ArrowLeft className="w-5 h-5" />
+            <span>All Elders</span>
+          </button>
+
+          <div className="w-px h-8 bg-slate-200 hidden sm:block"></div>
+
+          <div className="flex items-center gap-3">
+            <div className="w-12 h-12 rounded-2xl bg-indigo-50 border border-indigo-100 flex items-center justify-center text-indigo-600 font-bold text-lg">
+              <User className="w-6 h-6" />
             </div>
-            <p className="text-sm text-slate-500 font-medium">
-              Caregiver: <span className="font-semibold text-slate-700">{analytics?.caregiver_name || 'Assigned Care Team'}</span> • Language: {analytics?.preferred_language || 'English'}
-            </p>
+            <div>
+              <div className="flex items-center gap-2">
+                <h1 className="text-2xl font-bold text-slate-900">{analytics?.user_name || selectedPatient.name}</h1>
+                <span className="px-2.5 py-0.5 bg-slate-100 text-slate-700 font-bold text-xs rounded-full">
+                  Age: {analytics?.age || selectedPatient.age}
+                </span>
+              </div>
+              <p className="text-xs text-slate-500 font-medium">
+                Caregiver: <span className="font-semibold text-slate-700">{currentCaregiver.name}</span> • Preferred: {analytics?.preferred_language || 'English'}
+              </p>
+            </div>
           </div>
         </div>
 
         <div className="flex items-center gap-3">
           <button
-            onClick={loadData}
-            className="px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-xl flex items-center gap-2 transition text-sm"
+            onClick={() => loadPatientAnalytics(selectedPatient.id)}
+            className="px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-xl flex items-center gap-2 transition text-sm cursor-pointer"
           >
-            <RefreshCw className="w-4 h-4" />
-            <span>Refresh Data</span>
+            <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
+            <span>Refresh Analytics</span>
           </button>
           <button
             onClick={() => setIsAddMedOpen(true)}
-            className="px-4 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl flex items-center gap-2 transition text-sm shadow-sm"
+            className="px-4 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl flex items-center gap-2 transition text-sm shadow cursor-pointer"
           >
             <Plus className="w-4 h-4" />
             <span>Add Medication</span>
+          </button>
+          <button
+            onClick={handleLogout}
+            className="p-2.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-xl transition"
+            title="Log Out"
+          >
+            <LogOut className="w-5 h-5" />
           </button>
         </div>
       </div>
@@ -187,7 +237,7 @@ export default function CaregiverView({ user, onRefresh }) {
 
               <button
                 onClick={() => handleResolveAlert(alert.id)}
-                className="px-5 py-2.5 bg-rose-600 hover:bg-rose-700 text-white font-bold rounded-xl text-sm transition shadow flex-shrink-0"
+                className="px-5 py-2.5 bg-rose-600 hover:bg-rose-700 text-white font-bold rounded-xl text-sm transition shadow flex-shrink-0 cursor-pointer"
               >
                 Mark as Resolved
               </button>
@@ -268,7 +318,7 @@ export default function CaregiverView({ user, onRefresh }) {
                 <XAxis dataKey="day" stroke="#94a3b8" fontSize={12} tickLine={false} />
                 <YAxis stroke="#94a3b8" fontSize={12} tickLine={false} />
                 <Tooltip
-                  contentStyle={{ backgroundColor: '#ffffff', borderRadius: '12px', border: '1px solid #e2e8f0', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}
+                  contentStyle={{ backgroundColor: '#ffffff', borderRadius: '12px', border: '1px solid #e2e8f0' }}
                 />
                 <Legend />
                 <Bar dataKey="taken" name="Taken" fill="#10b981" radius={[6, 6, 0, 0]} />
