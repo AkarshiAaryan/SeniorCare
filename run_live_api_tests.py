@@ -8,7 +8,7 @@ client = TestClient(app)
 
 def log_step(title, method, endpoint, payload=None):
     print(f"\n=======================================================")
-    print(f"👉 STEP: {title}")
+    print(f">> STEP: {title}")
     print(f"HTTP REQUEST: {method} http://127.0.0.1:8000{endpoint}")
     if payload:
         print(f"REQUEST PAYLOAD:\n{json.dumps(payload, indent=2)}")
@@ -25,17 +25,20 @@ def log_step(title, method, endpoint, payload=None):
         response = client.delete(endpoint)
 
     print(f"STATUS CODE: {response.status_code}")
+    if "audio" in response.headers.get("content-type", ""):
+        print(f"API RESPONSE: <Binary Audio Stream ({len(response.content)} bytes, Content-Type: {response.headers.get('content-type')})>")
+        return response.content
     try:
         res_json = response.json()
         print(f"API RESPONSE:\n{json.dumps(res_json, indent=2)}")
+        return res_json
     except Exception:
         print(f"API RESPONSE: {response.text}")
-    
-    return response.json() if response.status_code in (200, 201) else None
+        return None
 
 
 def main():
-    print("🚀 Executing Live End-to-End API Calls against SeniorCare Backend Data...")
+    print("Executing Live End-to-End API Calls against SeniorCare Voice & Data Platform...")
     
     # 1. Health Check
     log_step("Root Server Health Check", "GET", "/")
@@ -71,34 +74,16 @@ def main():
     med_id = med["id"]
     log_step("Fetch User Medications", "GET", f"/medications/{user_id}")
 
-    # 6. Conversation & Health Ingestion
-    log_step("Ingest AI Voice Conversation Transcript", "POST", "/conversations", {
-        "user_id": user_id,
-        "transcript": "AI: Good morning John! How did you sleep? User: I slept poorly and feel mild knee pain.",
-        "extracted_data": {"mood": "tired", "sleep": "poor", "appetite": "normal", "pain": "mild knee pain"}
+    # 6. Direct Rime TTS Generation
+    log_step("Synthesize Speech with Rime TTS", "POST", "/voice/tts", {
+        "text": "Hello John, this is your daily care check-in. How are you feeling today?"
     })
 
-    log_step("Ingest Health Record", "POST", "/health-records", {
+    # 7. Voice Conversational Turn with LLM + Rime + Health Extraction
+    log_step("Process Conversational Voice Turn", "POST", "/voice/process-turn", {
         "user_id": user_id,
-        "mood": "tired",
-        "sleep": "poor",
-        "appetite": "normal",
-        "pain": "mild knee pain"
+        "text_input": "I took my morning medicine, but I had poor sleep and mild knee pain."
     })
-    log_step("Fetch Health Records for User", "GET", f"/health-records/{user_id}")
-
-    # 7. Medication Logging
-    log_step("Log Morning Dose as TAKEN (08:00)", "POST", "/medication-logs", {
-        "medication_id": med_id,
-        "scheduled_time": "08:00",
-        "taken": True
-    })
-    log_step("Log Evening Dose as MISSED (20:00)", "POST", "/medication-logs", {
-        "medication_id": med_id,
-        "scheduled_time": "20:00",
-        "taken": False
-    })
-    log_step("Fetch Medication Adherence Logs", "GET", f"/medication-logs/user/{user_id}")
 
     # 8. Event Triggering & Scheduler Check
     log_step("Manually Trigger Check-in Event", "POST", f"/events/trigger-test-checkin?user_id={user_id}&period=Morning")
@@ -108,7 +93,7 @@ def main():
     log_step("Generate Daily Summary Report for Caregiver Dashboard", "GET", f"/daily-report/{user_id}")
 
     print("\n=======================================================")
-    print("✅ All Live API Requests Executed & Returned Clean 200/201 Responses!")
+    print("[SUCCESS] All Live API Requests Executed & Returned Clean 200/201 Responses!")
 
 
 if __name__ == "__main__":

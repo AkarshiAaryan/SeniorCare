@@ -3,7 +3,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.database import engine, Base
-from app.routers import users, medications, health, medication_logs, reports, events
+from app.routers import users, medications, health, medication_logs, reports, events, voice
 from app.scheduler import start_scheduler, stop_scheduler
 
 # Create database tables
@@ -20,8 +20,8 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="SeniorCare Backend Data API",
-    description="Backend service for senior patient profiles, medication management, health record ingestion, automated schedulers, and daily reports.",
+    title="SeniorCare Voice & Data Platform API",
+    description="Backend service for senior patient profiles, medication management, Rime Voice integration, health record ingestion, automated schedulers, and daily reports.",
     version="1.0.0",
     lifespan=lifespan
 )
@@ -42,6 +42,7 @@ app.include_router(health.router)
 app.include_router(medication_logs.router)
 app.include_router(reports.router)
 app.include_router(events.router)
+app.include_router(voice.router)
 
 
 @app.get("/")

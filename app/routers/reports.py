@@ -58,7 +58,7 @@ def generate_daily_report(
                 models.MedicationLog.confirmed_at <= end_dt
             ).first()
 
-            status_str = "Taken ✓" if (log and log.taken) else ("Missed ⚠" if log else "Pending / No Log")
+            status_str = "Taken" if (log and log.taken) else ("Missed" if log else "Pending / No Log")
             medication_summary.append({
                 "medication_name": med.name,
                 "dosage": med.dosage,

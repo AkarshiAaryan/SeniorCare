@@ -58,7 +58,13 @@ venv.bak/
 
 # SQLite Database
 *.db
+*.db-journal
+*.db-wal
+*.db-shm
 *.sqlite3
+
+# Environment files
+.env
 
 # IDE / Editor files
 .vscode/
