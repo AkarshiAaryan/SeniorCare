@@ -42,7 +42,7 @@ def check_medication_schedules():
                     timestamp=datetime.now()
                 )
                 db.add(event)
-                logger.info(f"[EVENT TRIGGERED] User {user_id}: {msg}")
+                logger.info(f"[MEDICATION EVENT TRIGGERED] User {user_id}: {msg}")
 
         db.commit()
     except Exception as e:
@@ -54,14 +54,15 @@ def check_medication_schedules():
 
 def check_in_reminder(period: str):
     """
-    Background job triggered at fixed times (08:00 Morning, 13:00 Afternoon, 20:00 Evening)
+    Background job triggered at regular 3-hour intervals during daytime:
+    08:00, 11:00, 14:00, 17:00, 20:00
     """
     db: Session = SessionLocal()
     try:
         users = db.query(models.User).all()
         now_str = datetime.now().strftime("%H:%M")
         for user in users:
-            msg = f"{period} check-in is due ({now_str})"
+            msg = f"{period} 3-hour check-in is due ({now_str})"
             event = models.EventLog(
                 event_type="CHECK_IN_DUE",
                 user_id=user.id,
@@ -69,7 +70,7 @@ def check_in_reminder(period: str):
                 timestamp=datetime.now()
             )
             db.add(event)
-            logger.info(f"[CHECK-IN TRIGGERED] User {user.id} ({user.name}): {msg}")
+            logger.info(f"[3-HOUR CHECK-IN TRIGGERED] User {user.id} ({user.name}): {msg}")
 
         db.commit()
     except Exception as e:
@@ -89,34 +90,29 @@ def start_scheduler():
         replace_existing=True
     )
 
-    # Job 2: Check-in schedules
-    scheduler.add_job(
-        check_in_reminder,
-        'cron',
-        hour=8, minute=0,
-        args=['Morning'],
-        id='morning_check_in',
-        replace_existing=True
-    )
-    scheduler.add_job(
-        check_in_reminder,
-        'cron',
-        hour=13, minute=0,
-        args=['Afternoon'],
-        id='afternoon_check_in',
-        replace_existing=True
-    )
-    scheduler.add_job(
-        check_in_reminder,
-        'cron',
-        hour=20, minute=0,
-        args=['Evening'],
-        id='evening_check_in',
-        replace_existing=True
-    )
+    # Job 2: Regular 3-hour interval check-ins during waking hours
+    check_in_times = [
+        (8, 0, 'Morning'),
+        (11, 0, 'Late Morning'),
+        (14, 0, 'Afternoon'),
+        (17, 0, 'Late Afternoon'),
+        (20, 0, 'Evening')
+    ]
+
+    for hour, minute, period in check_in_times:
+        job_id = f"checkin_{hour:02d}_{minute:02d}"
+        scheduler.add_job(
+            check_in_reminder,
+            'cron',
+            hour=hour,
+            minute=minute,
+            args=[period],
+            id=job_id,
+            replace_existing=True
+        )
 
     scheduler.start()
-    logger.info("APScheduler started successfully.")
+    logger.info("APScheduler started successfully with 3-hour proactive intervals.")
 
 
 def stop_scheduler():

@@ -159,6 +159,26 @@ export async function processAudioTurn(userId, audioBlob, history = []) {
   return res.json();
 }
 
+export async function checkProactiveVoiceOutreach(userId) {
+  const res = await fetch(`${API_BASE}/voice/proactive-check/${userId}`);
+  if (!res.ok) return { has_proactive_prompt: false };
+  return res.json();
+}
+
+export async function triggerProactivePrompt(userId, reasonType = '3_hour_checkin', details = '') {
+  const res = await fetch(`${API_BASE}/voice/proactive-trigger`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      user_id: userId,
+      reason_type: reasonType,
+      details: details
+    })
+  });
+  if (!res.ok) throw new Error('Failed to trigger proactive prompt');
+  return res.json();
+}
+
 export async function playRimeAudio(base64Audio) {
   if (!base64Audio) return;
   try {

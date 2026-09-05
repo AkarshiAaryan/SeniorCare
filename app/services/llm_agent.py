@@ -24,6 +24,20 @@ Context about the patient:
 - Current Time of Day: {time_of_day}
 """
 
+PROACTIVE_PROMPT_TEMPLATE = """You are Elena, a warm, caring voice companion for elderly seniors.
+Generate an initial conversational spoken outreach to initiate contact with {user_name} (age {user_age}).
+
+Reason for outreach: {reason_description}
+Relevant details: {details}
+
+CRITICAL RULES:
+- Keep the message warm, conversational, and under 25 words.
+- Speak in first-person as Elena.
+- Ask ONE clear, gentle question.
+- Absolutely NO markdown, asterisks, or formatting.
+- Natural for speech synthesis via Rime TTS.
+"""
+
 
 class LLMAgentService:
     def __init__(self):
@@ -121,6 +135,70 @@ class LLMAgentService:
             return f"I understand, {user_name}. Getting enough rest is so important. Make sure to drink some water and stay comfortable today."
         else:
             return f"Hello {user_name}! It is wonderful to speak with you today. How are you feeling this morning?"
+
+    async def generate_proactive_outreach(
+        self,
+        user_name: str,
+        user_age: int,
+        reason_type: str,  # 'medication_due' or '3_hour_checkin'
+        details: str = "",
+        time_of_day: str = "Daytime"
+    ) -> str:
+        """
+        Generate proactive speech outreach to initiate natural spoken dialogue with the senior.
+        """
+        reason_desc = (
+            "Medication Intake Reminder"
+            if reason_type == "medication_due"
+            else "Routine 3-Hour Daytime Wellness Check-in"
+        )
+
+        prompt_content = PROACTIVE_PROMPT_TEMPLATE.format(
+            user_name=user_name,
+            user_age=user_age,
+            reason_description=reason_desc,
+            details=details
+        )
+
+        # 1. Try Groq
+        if self.groq_key:
+            try:
+                headers = {"Authorization": f"Bearer {self.groq_key}", "Content-Type": "application/json"}
+                payload = {
+                    "model": "llama-3.3-70b-versatile",
+                    "messages": [{"role": "user", "content": prompt_content}],
+                    "temperature": 0.7,
+                    "max_tokens": 80
+                }
+                async with httpx.AsyncClient(timeout=8.0) as client:
+                    res = await client.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=payload)
+                    if res.status_code == 200:
+                        return res.json()["choices"][0]["message"]["content"].strip()
+            except Exception as e:
+                logger.error(f"Groq proactive generation error: {e}")
+
+        # 2. Try OpenAI
+        if self.openai_key:
+            try:
+                headers = {"Authorization": f"Bearer {self.openai_key}", "Content-Type": "application/json"}
+                payload = {
+                    "model": self.model,
+                    "messages": [{"role": "user", "content": prompt_content}],
+                    "temperature": 0.7,
+                    "max_tokens": 80
+                }
+                async with httpx.AsyncClient(timeout=8.0) as client:
+                    res = await client.post("https://api.openai.com/v1/chat/completions", headers=headers, json=payload)
+                    if res.status_code == 200:
+                        return res.json()["choices"][0]["message"]["content"].strip()
+            except Exception as e:
+                logger.error(f"OpenAI proactive generation error: {e}")
+
+        # 3. Empathetic Fallback rule-based proactive prompts
+        if reason_type == "medication_due":
+            return f"Hello {user_name}! It is time for your prescribed medicine: {details}. Have you taken your dose yet?"
+        else:
+            return f"Hello {user_name}! Elena here with your regular {time_of_day.lower()} check-in. How are you feeling right now?"
 
 
 llm_agent = LLMAgentService()

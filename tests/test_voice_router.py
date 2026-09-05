@@ -41,6 +41,35 @@ def test_voice_process_turn_endpoint(client):
     assert data["extracted_health"]["medication_taken"] is True
 
 
+def test_voice_proactive_check_and_trigger(client):
+    # 1. Create User
+    u_res = client.post("/users", json={"name": "Patrick Stewart", "age": 84})
+    user_id = u_res.json()["id"]
+
+    # Check proactive prompt when no events exist
+    check_empty = client.get(f"/voice/proactive-check/{user_id}")
+    assert check_empty.status_code == 200
+    assert check_empty.json()["has_proactive_prompt"] is False
+
+    # Trigger proactive prompt (Medication Due)
+    trig_res = client.post("/voice/proactive-trigger", json={
+        "user_id": user_id,
+        "reason_type": "medication_due",
+        "details": "Lisinopril 10mg"
+    })
+    assert trig_res.status_code == 200
+    trig_data = trig_res.json()
+    assert trig_data["has_proactive_prompt"] is True
+    assert "Patrick Stewart" in trig_data["text"]
+    assert "Lisinopril" in trig_data["text"]
+    assert len(trig_data["audio_base64"]) > 0
+
+    # Query proactive check (should find the pending event)
+    check_pending = client.get(f"/voice/proactive-check/{user_id}")
+    assert check_pending.status_code == 200
+    assert check_pending.json()["has_proactive_prompt"] is True
+
+
 def test_voice_process_turn_nonexistent_user(client):
     res = client.post("/voice/process-turn", json={
         "user_id": 99999,
