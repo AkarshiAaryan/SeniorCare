@@ -48,7 +48,7 @@ class RimeTTSService:
             (r'\bcaps\b', 'capsules'),
             (r'(\d+)\s*cap\b', r'\1 capsule'),
             (r'\bcap\b', 'capsule'),
-            (r'\b(\d+):00\s*(am|pm|AM|PM)?\b', r'\1 o\'clock \2'),
+            (r'\b(\d+):00\s*(am|pm|AM|PM)?\b', r"\1 o'clock \2"),
             (r'\b(\d+):(\d{2})\b', r'\1 \2'),
             (r'\s*&\s*', ' and '),
             (r'\bw/(?=\s|$)', 'with '),
