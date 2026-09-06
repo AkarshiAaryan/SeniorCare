@@ -1,10 +1,11 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Mic, MicOff, Volume2, X, Send, Sparkles, AlertCircle } from 'lucide-react';
+import { Mic, MicOff, Volume2, X, Send, Sparkles, AlertCircle, Activity } from 'lucide-react';
 import { processAudioTurn, processVoiceTurn, playRimeAudio } from '../services/api';
 
 export default function VoiceModal({ isOpen, onClose, user, onUpdate, initialAssistantText, initialAudioBase64 }) {
   const [isRecording, setIsRecording] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [liveTranscript, setLiveTranscript] = useState('');
   const [transcript, setTranscript] = useState('');
   const [assistantText, setAssistantText] = useState('Hello! I am Elena, your voice care assistant. How are you feeling today?');
   const [history, setHistory] = useState([]);
@@ -13,6 +14,8 @@ export default function VoiceModal({ isOpen, onClose, user, onUpdate, initialAss
 
   const mediaRecorderRef = useRef(null);
   const audioChunksRef = useRef([]);
+  const recognitionRef = useRef(null);
+  const finalTranscriptRef = useRef('');
 
   useEffect(() => {
     if (isOpen) {
@@ -30,6 +33,16 @@ export default function VoiceModal({ isOpen, onClose, user, onUpdate, initialAss
         setStatusMessage('Tap the microphone to speak');
       }
       setTranscript('');
+      setLiveTranscript('');
+      finalTranscriptRef.current = '';
+    } else {
+      // Cleanup when closed
+      if (recognitionRef.current) {
+        try { recognitionRef.current.stop(); } catch {}
+      }
+      if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+        try { mediaRecorderRef.current.stop(); } catch {}
+      }
     }
   }, [isOpen, user, initialAssistantText, initialAudioBase64]);
 
@@ -38,8 +51,59 @@ export default function VoiceModal({ isOpen, onClose, user, onUpdate, initialAss
   const startRecording = async () => {
     try {
       audioChunksRef.current = [];
+      setLiveTranscript('');
+      finalTranscriptRef.current = '';
+
+      // 1. Initialize Browser Web Speech API for real-time live on-screen text
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      if (SpeechRecognition) {
+        try {
+          const recognition = new SpeechRecognition();
+          recognition.continuous = true;
+          recognition.interimResults = true;
+          recognition.lang = user?.preferred_language === 'Spanish' ? 'es-ES' : 'en-US';
+
+          recognition.onresult = (event) => {
+            let interimText = '';
+            let completeText = '';
+            for (let i = 0; i < event.results.length; ++i) {
+              if (event.results[i].isFinal) {
+                completeText += event.results[i][0].transcript + ' ';
+              } else {
+                interimText += event.results[i][0].transcript;
+              }
+            }
+            const currentFull = (completeText + interimText).trim();
+            finalTranscriptRef.current = currentFull;
+            setLiveTranscript(currentFull);
+            setTranscript(currentFull);
+          };
+
+          recognition.onerror = (event) => {
+            console.warn('SpeechRecognition note:', event.error);
+          };
+
+          recognition.start();
+          recognitionRef.current = recognition;
+        } catch (recErr) {
+          console.warn('SpeechRecognition start failed:', recErr);
+        }
+      }
+
+      // 2. Initialize MediaRecorder with best supported audio container
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const mediaRecorder = new MediaRecorder(stream);
+      let mimeType = 'audio/webm';
+      if (MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) {
+        mimeType = 'audio/webm;codecs=opus';
+      } else if (MediaRecorder.isTypeSupported('audio/webm')) {
+        mimeType = 'audio/webm';
+      } else if (MediaRecorder.isTypeSupported('audio/ogg')) {
+        mimeType = 'audio/ogg';
+      } else if (MediaRecorder.isTypeSupported('audio/wav')) {
+        mimeType = 'audio/wav';
+      }
+
+      const mediaRecorder = new MediaRecorder(stream, { mimeType });
       mediaRecorderRef.current = mediaRecorder;
 
       mediaRecorder.ondataavailable = (event) => {
@@ -49,21 +113,25 @@ export default function VoiceModal({ isOpen, onClose, user, onUpdate, initialAss
       };
 
       mediaRecorder.onstop = async () => {
-        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/wav' });
-        await handleAudioSubmit(audioBlob);
+        const audioBlob = new Blob(audioChunksRef.current, { type: mimeType });
+        const capturedText = finalTranscriptRef.current.trim();
+        await handleAudioSubmit(audioBlob, capturedText);
         stream.getTracks().forEach((track) => track.stop());
       };
 
-      mediaRecorder.start();
+      mediaRecorder.start(250); // Slice every 250ms for smooth capture
       setIsRecording(true);
       setStatusMessage('Listening to you... Speak naturally.');
     } catch (err) {
       console.error('Microphone access error:', err);
-      setStatusMessage('Microphone access denied. You can also type below.');
+      setStatusMessage('Microphone access denied or not available. You can type below.');
     }
   };
 
   const stopRecording = () => {
+    if (recognitionRef.current) {
+      try { recognitionRef.current.stop(); } catch {}
+    }
     if (mediaRecorderRef.current && isRecording) {
       mediaRecorderRef.current.stop();
       setIsRecording(false);
@@ -72,10 +140,12 @@ export default function VoiceModal({ isOpen, onClose, user, onUpdate, initialAss
     }
   };
 
-  const handleAudioSubmit = async (audioBlob) => {
+  const handleAudioSubmit = async (audioBlob, liveCapturedText) => {
     try {
-      const result = await processAudioTurn(user.id, audioBlob, history);
-      setTranscript(result.user_text);
+      const result = await processAudioTurn(user.id, audioBlob, history, liveCapturedText);
+      const spokenByUser = liveCapturedText || result.user_text;
+      setTranscript(spokenByUser);
+      setLiveTranscript('');
       setAssistantText(result.assistant_text);
       setHistory(result.history);
       setStatusMessage('Elena responded!');
@@ -85,7 +155,23 @@ export default function VoiceModal({ isOpen, onClose, user, onUpdate, initialAss
       if (onUpdate) onUpdate();
     } catch (err) {
       console.error('Voice turn error:', err);
-      setStatusMessage('Could not process speech. Please try again.');
+      // Fallback: if we have live captured text, try processVoiceTurn directly
+      if (liveCapturedText) {
+        try {
+          const fallbackRes = await processVoiceTurn(user.id, liveCapturedText, history);
+          setTranscript(liveCapturedText);
+          setLiveTranscript('');
+          setAssistantText(fallbackRes.assistant_text);
+          setHistory(fallbackRes.history);
+          setStatusMessage('Elena responded!');
+          if (fallbackRes.audio_base64) {
+            await playRimeAudio(fallbackRes.audio_base64);
+          }
+          if (onUpdate) onUpdate();
+          return;
+        } catch {}
+      }
+      setStatusMessage('Could not process speech. Please try again or type below.');
     } finally {
       setIsProcessing(false);
     }
@@ -98,6 +184,7 @@ export default function VoiceModal({ isOpen, onClose, user, onUpdate, initialAss
     setIsProcessing(true);
     setStatusMessage('Elena is thinking...');
     setTranscript(text);
+    setLiveTranscript('');
     setCustomText('');
 
     try {
@@ -144,34 +231,65 @@ export default function VoiceModal({ isOpen, onClose, user, onUpdate, initialAss
         <div className="p-6 md:p-8 flex-1 overflow-y-auto flex flex-col items-center justify-center text-center space-y-6">
           {/* Assistant Voice Bubble */}
           <div className="bg-emerald-50 border-2 border-emerald-200/80 rounded-2xl p-6 w-full text-left shadow-sm">
-            <div className="flex items-center gap-2 text-emerald-800 font-bold text-sm mb-2">
-              <Volume2 className="w-5 h-5 text-emerald-600 animate-pulse" />
-              <span>ELENA SAYS:</span>
+            <div className="flex items-center justify-between text-emerald-800 font-bold text-sm mb-2">
+              <div className="flex items-center gap-2">
+                <Volume2 className="w-5 h-5 text-emerald-600 animate-pulse" />
+                <span>ELENA SAYS:</span>
+              </div>
+              <span className="text-xs font-semibold px-2.5 py-0.5 bg-emerald-200/60 rounded-full text-emerald-800">
+                Spoken Aloud
+              </span>
             </div>
             <p className="text-2xl md:text-3xl font-semibold text-slate-800 leading-snug">
               "{assistantText}"
             </p>
           </div>
 
-          {/* User's Heard Speech */}
-          {transcript && (
-            <div className="bg-slate-100 rounded-xl p-4 w-full text-left border border-slate-200">
-              <span className="text-xs font-bold text-slate-500 uppercase tracking-wider block mb-1">You said:</span>
-              <p className="text-lg text-slate-700 font-medium italic">"{transcript}"</p>
+          {/* Live Recording Speech Bubble (Appears in Real-Time as User Speaks) */}
+          {isRecording && (
+            <div className="bg-rose-50 border-2 border-rose-300 rounded-2xl p-5 w-full text-left shadow-md animate-in fade-in zoom-in-95">
+              <div className="flex items-center justify-between text-rose-700 font-bold text-sm mb-2">
+                <div className="flex items-center gap-2">
+                  <span className="relative flex h-3 w-3">
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-rose-400 opacity-75"></span>
+                    <span className="relative inline-flex rounded-full h-3 w-3 bg-rose-600"></span>
+                  </span>
+                  <span>LISTENING TO YOUR VOICE (LIVE):</span>
+                </div>
+                <div className="flex items-center gap-1">
+                  <span className="w-1.5 h-4 bg-rose-500 rounded-full animate-pulse"></span>
+                  <span className="w-1.5 h-6 bg-rose-600 rounded-full animate-pulse delay-75"></span>
+                  <span className="w-1.5 h-3 bg-rose-500 rounded-full animate-pulse delay-150"></span>
+                </div>
+              </div>
+              <p className="text-xl md:text-2xl font-bold text-slate-900 leading-snug min-h-[2rem]">
+                {liveTranscript ? `"${liveTranscript}"` : <span className="text-slate-400 italic">Listening... Start speaking now.</span>}
+              </p>
+            </div>
+          )}
+
+          {/* User's Heard Speech (After Turn or Completed) */}
+          {!isRecording && transcript && (
+            <div className="bg-slate-100 rounded-2xl p-5 w-full text-left border-2 border-slate-200 shadow-sm animate-in fade-in">
+              <div className="flex items-center justify-between text-slate-600 font-bold text-xs uppercase tracking-wider mb-1">
+                <span>You said:</span>
+                <span className="text-emerald-700 font-bold lowercase">transcribed</span>
+              </div>
+              <p className="text-xl md:text-2xl text-slate-800 font-bold">"{transcript}"</p>
             </div>
           )}
 
           {/* Pulsing Visualizer & Big Mic Button */}
-          <div className="flex flex-col items-center justify-center my-4">
+          <div className="flex flex-col items-center justify-center my-2">
             <button
               onClick={isRecording ? stopRecording : startRecording}
               disabled={isProcessing}
-              className={`w-32 h-32 md:w-36 md:h-36 rounded-full flex flex-col items-center justify-center shadow-2xl transition-all duration-300 ${
+              className={`w-32 h-32 md:w-36 md:h-36 rounded-full flex flex-col items-center justify-center shadow-2xl transition-all duration-300 cursor-pointer ${
                 isRecording
-                  ? 'bg-rose-600 text-white scale-110 ring-8 ring-rose-300 animate-pulse'
+                  ? 'bg-rose-600 text-white scale-110 ring-8 ring-rose-300 animate-pulse shadow-rose-300/50'
                   : isProcessing
                   ? 'bg-slate-400 text-white cursor-not-allowed'
-                  : 'bg-emerald-600 hover:bg-emerald-500 text-white hover:scale-105 ring-8 ring-emerald-100'
+                  : 'bg-emerald-600 hover:bg-emerald-500 text-white hover:scale-105 ring-8 ring-emerald-100 shadow-emerald-200'
               }`}
             >
               {isRecording ? (
@@ -188,7 +306,7 @@ export default function VoiceModal({ isOpen, onClose, user, onUpdate, initialAss
                 </>
               )}
             </button>
-            <p className="text-base font-semibold text-slate-600 mt-4">{statusMessage}</p>
+            <p className="text-base font-bold text-slate-700 mt-3">{statusMessage}</p>
           </div>
 
           {/* Quick Voice Prompt Shortcuts */}

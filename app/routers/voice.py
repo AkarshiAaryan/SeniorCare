@@ -123,24 +123,32 @@ async def process_turn(
 @router.post("/process-audio-turn", response_model=VoiceTurnResponse)
 async def process_audio_turn(
     user_id: int = Form(...),
-    audio_file: UploadFile = File(...),
+    audio_file: Optional[UploadFile] = File(None),
+    text_input: Optional[str] = Form(None),
     history_json: Optional[str] = Form(None),
     speaker: Optional[str] = Form(None),
     speed: Optional[float] = Form(None),
     db: Session = Depends(get_db)
 ):
     """
-    Process an audio-based conversational turn from microphone:
-    Audio -> STT -> LLM response -> Rime TTS -> Data extraction -> DB save.
+    Process an audio or speech-based conversational turn from microphone:
+    Audio/Live STT -> LLM response -> Rime TTS -> Data extraction -> DB save.
     """
     try:
-        audio_bytes = await audio_file.read()
+        audio_bytes = None
+        filename = "audio.wav"
+        if audio_file:
+            audio_bytes = await audio_file.read()
+            filename = audio_file.filename or "audio.wav"
+
         history = json.loads(history_json) if history_json else []
 
         result = await voice_orchestrator.process_turn(
             db=db,
             user_id=user_id,
             audio_bytes=audio_bytes,
+            text_input=text_input,
+            filename=filename,
             history=history,
             speaker=speaker,
             speed=speed
