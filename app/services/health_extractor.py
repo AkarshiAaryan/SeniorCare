@@ -62,33 +62,37 @@ class HealthExtractorService:
 
         # 1. Try Gemini API JSON extraction (Native Google REST Endpoint)
         if is_valid_key(self.gemini_key):
-            try:
-                url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.gemini_model}:generateContent?key={self.gemini_key}"
-                payload = {
-                    "systemInstruction": {
-                        "parts": [{"text": EXTRACTION_SYSTEM_PROMPT}]
-                    },
-                    "contents": [{
-                        "role": "user",
-                        "parts": [{"text": prompt_user}]
-                    }],
-                    "generationConfig": {
-                        "responseMimeType": "application/json",
-                        "temperature": 0.1
-                    }
+            candidate_models = [self.gemini_model, "gemini-2.5-flash-lite", "gemini-flash-latest", "gemini-2.5-flash"]
+            seen_models = set()
+            models_to_try = [m for m in candidate_models if m and not (m in seen_models or seen_models.add(m))]
+            payload = {
+                "systemInstruction": {
+                    "parts": [{"text": EXTRACTION_SYSTEM_PROMPT}]
+                },
+                "contents": [{
+                    "role": "user",
+                    "parts": [{"text": prompt_user}]
+                }],
+                "generationConfig": {
+                    "responseMimeType": "application/json",
+                    "temperature": 0.1
                 }
-                async with httpx.AsyncClient(timeout=12.0) as client:
-                    res = await client.post(url, json=payload)
-                    if res.status_code == 200:
-                        data = res.json()
-                        parts = data.get("candidates", [{}])[0].get("content", {}).get("parts", [])
-                        content = "".join(p.get("text", "") for p in parts if isinstance(p, dict)).strip()
-                        if content:
-                            return json.loads(content)
-                    else:
-                        logger.warning(f"Gemini extraction returned code {res.status_code}: {res.text}")
-            except Exception as e:
-                logger.error(f"Gemini Extraction error: {e}")
+            }
+            for model_name in models_to_try:
+                try:
+                    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={self.gemini_key}"
+                    async with httpx.AsyncClient(timeout=12.0) as client:
+                        res = await client.post(url, json=payload)
+                        if res.status_code == 200:
+                            data = res.json()
+                            parts = data.get("candidates", [{}])[0].get("content", {}).get("parts", [])
+                            content = "".join(p.get("text", "") for p in parts if isinstance(p, dict)).strip()
+                            if content:
+                                return json.loads(content)
+                        else:
+                            logger.warning(f"Gemini extraction model {model_name} returned code {res.status_code}: {res.text}")
+                except Exception as e:
+                    logger.error(f"Gemini Extraction error with {model_name}: {e}")
 
         # 2. Try Groq API JSON extraction
         if is_valid_key(self.groq_key):

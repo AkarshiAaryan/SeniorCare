@@ -5,22 +5,22 @@ from app.config import settings
 
 logger = logging.getLogger("LLMAgent")
 
-SYSTEM_PROMPT = """You are Elena, a warm, caring, respectful, and attentive voice companion for elderly seniors.
-You talk like a real, empathetic friend sitting beside the senior in their living room.
+SYSTEM_PROMPT = """You are Elena, a warm, dedicated, compassionate, and attentive voice caregiver companion for elderly seniors.
+You talk like a caring family member or an experienced, loving nurse sitting right beside the senior in their living room.
 
-YOUR CORE GOALS:
-1. Have a genuine, flowing conversation. Acknowledge and react to what the senior citizen just said with authentic empathy and warmth.
-2. Maintain conversational context. NEVER repeat introductory greetings like "Hello, how are you feeling" once the conversation is underway.
-3. Incorporate their health history: If the patient had recent symptoms (like pain, poor sleep, appetite changes), gently inquire about them.
-4. Check on their prescribed medications naturally for the current time of day.
-5. Provide space for open sharing: Invite them to share what's on their mind (e.g., "Is there anything else on your mind today, or anything you'd like to chat about?").
+YOUR CORE CAREGIVER PROTOCOLS:
+1. MEDICAL TRIAGE & SICKNESS: If the senior says they are NOT feeling well, feeling sick, or asks if they should consult a doctor (e.g. "do you think I need to consult a doctor?"), treat their concern seriously and empathetically. Validate their feeling, gently advise consulting their doctor or healthcare provider if symptoms persist or feel concerning, and ask what specific symptoms they are experiencing.
+2. GENUINE EMPATHETIC LISTENING: Always directly react to what the senior just said with authentic empathy and warmth before asking a follow-up.
+3. PRESERVE CONVERSATIONAL CONTINUITY: NEVER repeat introductory greetings (like "Hello John, how are you") once a conversation is underway.
+4. HEALTH & MEDICATION INTEGRATION: Inquire gently about their prescribed medications and recent symptoms (such as pain, poor sleep, or low mood) when relevant.
+5. OPEN & SAFE SHARING: Give the senior plenty of comfort and space to talk about their feelings.
 
 CRITICAL VOICE DELIVERY RULES ("WRITING FOR THE EAR"):
-- Your response will be spoken aloud via Rime Text-to-Speech.
-- Speak in natural, short conversational sentences (10 to 18 words per sentence, maximum 2 sentences per response).
+- Your response is spoken aloud via Rime Text-to-Speech.
+- Speak in natural, short conversational sentences (10 to 20 words per sentence, maximum 2 sentences per response).
 - NEVER use markdown symbols, asterisks (*), hashtags (#), brackets, or bullet points.
-- NEVER ask more than ONE question at a time. Seniors get overwhelmed by multi-part questions.
-- Speak warmly and gently, with reassuring phrasing.
+- NEVER ask more than ONE clear, gentle question at a time.
+- Speak with warmth, patience, and reassuring kindness.
 
 Patient Profile & Clinical Context:
 - Name: {user_name}
@@ -156,7 +156,7 @@ class LLMAgentService:
                 }
             }
 
-            candidate_models = [self.gemini_model, "gemini-2.5-flash", "gemini-1.5-flash-latest"]
+            candidate_models = [self.gemini_model, "gemini-2.5-flash-lite", "gemini-flash-latest", "gemini-2.5-flash"]
             seen_models = set()
             models_to_try = [m for m in candidate_models if m and not (m in seen_models or seen_models.add(m))]
 
@@ -218,31 +218,54 @@ class LLMAgentService:
             except Exception as e:
                 logger.error(f"OpenAI LLM generation error: {e}")
 
-        # 4. Contextual Multi-Turn Fallback Engine (Never repeats intro once conversation is active)
+        # 4. Contextual Multi-Turn Caregiver Fallback Engine
         user_msgs = [m.get("content", "").strip() for m in messages if m.get("role") == "user"]
         last_user_msg = (user_msgs[-1] if user_msgs else "").lower()
         turn_count = len(user_msgs)
 
-        # Empathetic emotional recognition
-        if any(w in last_user_msg for w in ["down", "sad", "lonely", "unhappy", "depressed", "blue", "crying", "upset", "low", "bad day"]):
-            return f"I am so sorry you are feeling down today, {user_name}. Please know I am right here with you. Would you like to tell me what's on your mind?"
-        elif any(w in last_user_msg for w in ["pain", "hurt", "sore", "aching", "back", "knee", "headache"]):
+        # Detect negations (e.g. "not feeling well", "don't feel good", "not doing well")
+        has_negation = any(neg in last_user_msg for neg in ["not", "don't", "dont", "no", "never", "hardly", "barely", "isn't", "isnt", "won't", "wont"])
+
+        # 1. Doctor consultation / medical triage intent
+        if any(w in last_user_msg for w in ["doctor", "physician", "consult", "clinic", "hospital", "ambulance", "nurse", "er", "emergency"]):
+            return f"I am so sorry you are not feeling well, {user_name}. If your symptoms feel concerning or persistent, consulting your doctor is definitely a wise choice. What symptoms are you experiencing right now?"
+
+        # 2. Illness / Not feeling well (with negation handling)
+        elif (has_negation and any(w in last_user_msg for w in ["well", "good", "fine", "great", "better", "alright"])) or any(w in last_user_msg for w in ["sick", "dizzy", "nausea", "nauseous", "fever", "cough", "weak", "unwell", "awful", "terrible", "bad"]):
+            return f"I am so sorry to hear you are not feeling well, {user_name}. Please sit down comfortably and rest. Are you having any specific pain, or would you like to consult your doctor?"
+
+        # 3. Pain / Aches
+        elif any(w in last_user_msg for w in ["pain", "hurt", "hurts", "hurting", "sore", "aching", "ache", "back", "knee", "headache", "chest"]):
             return f"I am so sorry to hear you are having pain, {user_name}. Please take it easy and rest. Have you taken your prescribed medicine today?"
-        elif any(w in last_user_msg for w in ["sick", "dizzy", "nausea", "fever", "cough", "weak", "unwell"]):
-            return f"I am sorry you are not feeling well, {user_name}. Please sit comfortably and sip some water. Have you taken your medicine today?"
-        elif any(w in last_user_msg for w in ["well", "good", "fine", "great", "wonderful", "better", "alright"]):
+
+        # 4. Emotional distress / loneliness
+        elif any(w in last_user_msg for w in ["down", "sad", "lonely", "unhappy", "depressed", "blue", "crying", "upset", "low", "bad day", "scared", "worried", "anxious"]):
+            return f"I am so sorry you are feeling down today, {user_name}. Please know I am right here with you. Would you like to tell me what's on your mind?"
+
+        # 5. Positive updates (ONLY when NO negation is present!)
+        elif not has_negation and any(w in last_user_msg for w in ["well", "good", "fine", "great", "wonderful", "better", "alright"]):
             if turn_count <= 1:
                 return f"I am so glad to hear you are doing well, {user_name}! Have you had a chance to take your prescribed medicine today?"
             else:
                 return f"That is wonderful to hear, {user_name}! Is there anything else on your mind today, or anything you would like to share?"
-        elif "yes" in last_user_msg and any(w in last_user_msg for w in ["medicine", "pill", "took", "taken", "dose", "already"]):
+
+        # 6. Medication taken confirmation
+        elif ("yes" in last_user_msg or "took" in last_user_msg or "taken" in last_user_msg) and any(w in last_user_msg for w in ["medicine", "pill", "dose", "already", "medication"]):
             return f"Wonderful news, {user_name}! I am glad you took your medicine. How did you sleep last night?"
+
+        # 7. Sleep / fatigue
         elif any(w in last_user_msg for w in ["sleep", "tired", "insomnia", "exhausted", "rest"]):
             return f"I understand, {user_name}. Getting good rest is so important for your health. Is there anything else you would like to tell me today?"
-        elif "no" in last_user_msg and (len(last_user_msg) < 20 or any(w in last_user_msg for w in ["nothing", "else", "all", "good"])):
+
+        # 8. Closing conversation
+        elif last_user_msg.startswith("no") and (len(last_user_msg) < 20 or any(w in last_user_msg for w in ["nothing", "else", "all", "good", "bye"])):
             return f"Alright, {user_name}! Thank you so much for chatting with me today. Have a lovely rest of your day, and remember I am always here for you."
+
+        # 9. Multi-turn continuation
         elif turn_count > 1:
             return f"Thank you for sharing that with me, {user_name}. How can I best support you today?"
+
+        # 10. Initial greeting
         else:
             return f"Hello {user_name}! It is wonderful to speak with you today. How are you feeling this {time_of_day.lower()}?"
 
@@ -278,7 +301,7 @@ class LLMAgentService:
 
         # 1. Try Gemini
         if is_valid_key(self.gemini_key):
-            candidate_models = [self.gemini_model, "gemini-2.5-flash", "gemini-1.5-flash-latest"]
+            candidate_models = [self.gemini_model, "gemini-2.5-flash-lite", "gemini-flash-latest", "gemini-2.5-flash"]
             seen_models = set()
             models_to_try = [m for m in candidate_models if m and not (m in seen_models or seen_models.add(m))]
             payload = {
