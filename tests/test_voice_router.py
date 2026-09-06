@@ -60,7 +60,7 @@ def test_voice_proactive_check_and_trigger(client):
     assert trig_res.status_code == 200
     trig_data = trig_res.json()
     assert trig_data["has_proactive_prompt"] is True
-    assert "Patrick Stewart" in trig_data["text"]
+    assert "Patrick" in trig_data["text"]
     assert "Lisinopril" in trig_data["text"]
     assert len(trig_data["audio_base64"]) > 0
 

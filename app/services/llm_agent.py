@@ -5,22 +5,28 @@ from app.config import settings
 
 logger = logging.getLogger("LLMAgent")
 
-SYSTEM_PROMPT = """You are Elena, a warm, caring, and attentive voice companion for elderly seniors.
-Your goal is to have a short, friendly daily check-in with the senior citizen to ask how they are feeling, check their sleep and appetite, ask about any pain, and verify whether they have taken their prescribed medications.
+SYSTEM_PROMPT = """You are Elena, a warm, dedicated, compassionate, and attentive voice caregiver companion for elderly seniors.
+You talk like a caring family member or an experienced, loving nurse sitting right beside the senior in their living room.
+
+YOUR CORE CAREGIVER PROTOCOLS:
+1. MEDICAL TRIAGE & SICKNESS: If the senior says they are NOT feeling well, feeling sick, or asks if they should consult a doctor (e.g. "do you think I need to consult a doctor?"), treat their concern seriously and empathetically. Validate their feeling, gently advise consulting their doctor or healthcare provider if symptoms persist or feel concerning, and ask what specific symptoms they are experiencing.
+2. GENUINE EMPATHETIC LISTENING: Always directly react to what the senior just said with authentic empathy and warmth before asking a follow-up.
+3. PRESERVE CONVERSATIONAL CONTINUITY: NEVER repeat introductory greetings (like "Hello John, how are you") once a conversation is underway.
+4. HEALTH & MEDICATION INTEGRATION: Inquire gently about their prescribed medications and recent symptoms (such as pain, poor sleep, or low mood) when relevant.
+5. OPEN & SAFE SHARING: Give the senior plenty of comfort and space to talk about their feelings.
 
 CRITICAL VOICE DELIVERY RULES ("WRITING FOR THE EAR"):
-1. Your response will be spoken aloud using Rime Text-to-Speech.
-2. Speak warmly, respectfully, and gently as if sitting beside them in their living room.
-3. Keep your sentences short, simple, and natural (10 to 15 words per sentence maximum).
-4. NEVER use markdown symbols, asterisks (*), hashtags (#), brackets, or bullet points.
-5. NEVER ask more than one question at a time. Seniors get overwhelmed by multi-part questions.
-6. Use natural conversational phrasing, friendly greetings, and gentle reassurance.
-7. If the user mentions pain, poor sleep, or missing a medication, respond with warmth and care.
+- Your response is spoken aloud via Rime Text-to-Speech.
+- Speak in natural, short conversational sentences (10 to 20 words per sentence, maximum 2 sentences per response).
+- NEVER use markdown symbols, asterisks (*), hashtags (#), brackets, or bullet points.
+- NEVER ask more than ONE clear, gentle question at a time.
+- Speak with warmth, patience, and reassuring kindness.
 
-Context about the patient:
+Patient Profile & Clinical Context:
 - Name: {user_name}
 - Age: {user_age}
 - Prescribed Medications & Timings: {medications_info}
+- Recent Health History & Symptoms: {health_history_info}
 - Current Time of Day: {time_of_day}
 """
 
@@ -29,6 +35,7 @@ Generate an initial conversational spoken outreach to initiate contact with {use
 
 Reason for outreach: {reason_description}
 Relevant details: {details}
+Recent Health Context: {health_history_info}
 
 CRITICAL RULES:
 - Keep the message warm, conversational, and under 25 words.
@@ -51,7 +58,14 @@ class LLMAgentService:
         self.groq_key = settings.GROQ_API_KEY
         self.model = settings.LLM_MODEL
 
-    def build_system_prompt(self, user_name: str, user_age: int, medications: List[Dict[str, Any]], time_of_day: str = "day") -> str:
+    def build_system_prompt(
+        self,
+        user_name: str,
+        user_age: int,
+        medications: List[Dict[str, Any]],
+        health_history: Optional[List[Any]] = None,
+        time_of_day: str = "day"
+    ) -> str:
         med_str_list = []
         for m in medications:
             times_str = ", ".join(s.get("time", "") for s in m.get("schedules", [])) if isinstance(m, dict) else ""
@@ -61,10 +75,35 @@ class LLMAgentService:
 
         medications_info = "; ".join(med_str_list) if med_str_list else "None registered"
 
+        # Format past health telemetry notes
+        history_items = []
+        if health_history:
+            for h in health_history[:3]:
+                h_parts = []
+                pain_val = getattr(h, "pain", None) or (h.get("pain") if isinstance(h, dict) else None)
+                sleep_val = getattr(h, "sleep", None) or (h.get("sleep") if isinstance(h, dict) else None)
+                mood_val = getattr(h, "mood", None) or (h.get("mood") if isinstance(h, dict) else None)
+                appetite_val = getattr(h, "appetite", None) or (h.get("appetite") if isinstance(h, dict) else None)
+
+                if pain_val and pain_val not in ["none", "none reported", "None"]:
+                    h_parts.append(f"reported pain: {pain_val}")
+                if sleep_val and sleep_val not in ["not reported", "good", "normal"]:
+                    h_parts.append(f"sleep: {sleep_val}")
+                if mood_val and mood_val not in ["not reported", "normal"]:
+                    h_parts.append(f"mood: {mood_val}")
+                if appetite_val and appetite_val not in ["not reported", "normal"]:
+                    h_parts.append(f"appetite: {appetite_val}")
+                
+                if h_parts:
+                    history_items.append("; ".join(h_parts))
+
+        health_history_info = " | ".join(history_items) if history_items else "No prior severe symptoms reported recently."
+
         return SYSTEM_PROMPT.format(
             user_name=user_name,
             user_age=user_age,
             medications_info=medications_info,
+            health_history_info=health_history_info,
             time_of_day=time_of_day
         )
 
@@ -74,36 +113,68 @@ class LLMAgentService:
         user_name: str = "Friend",
         user_age: int = 75,
         medications: Optional[List[Any]] = None,
+        health_history: Optional[List[Any]] = None,
         time_of_day: str = "Morning"
     ) -> str:
         """
-        Generate empathetic conversational response given context and chat history.
+        Generate empathetic conversational response given context, health history, and chat history.
         """
         meds = medications or []
-        system_instruction = self.build_system_prompt(user_name, user_age, meds, time_of_day)
+        system_instruction = self.build_system_prompt(user_name, user_age, meds, health_history, time_of_day)
 
         full_messages = [{"role": "system", "content": system_instruction}] + messages
 
-        # 1. Try Gemini API (via Google OpenAI-compatible endpoint)
+        # 1. Try Gemini API (Native Google REST Endpoint)
         if is_valid_key(self.gemini_key):
-            try:
-                headers = {
-                    "Authorization": f"Bearer {self.gemini_key}",
-                    "Content-Type": "application/json"
-                }
-                payload = {
-                    "model": self.gemini_model,
-                    "messages": full_messages,
+            contents = []
+            for m in messages:
+                role = "model" if m.get("role") == "assistant" else "user"
+                # Skip leading assistant message since Gemini requires first turn to be 'user'
+                if not contents and role == "model":
+                    continue
+                # Merge consecutive same-role messages
+                if contents and contents[-1]["role"] == role:
+                    contents[-1]["parts"][0]["text"] += "\n" + m.get("content", "")
+                else:
+                    contents.append({
+                        "role": role,
+                        "parts": [{"text": m.get("content", "")}]
+                    })
+
+            if not contents:
+                contents = [{"role": "user", "parts": [{"text": "Hello Elena"}]}]
+
+            payload = {
+                "systemInstruction": {
+                    "parts": [{"text": system_instruction}]
+                },
+                "contents": contents,
+                "generationConfig": {
                     "temperature": 0.7,
-                    "max_tokens": 150
+                    "maxOutputTokens": 300,
+                    "thinkingConfig": {"thinkingBudget": 0}
                 }
-                async with httpx.AsyncClient(timeout=10.0) as client:
-                    res = await client.post("https://generativelanguage.googleapis.com/v1beta/openai/chat/completions", headers=headers, json=payload)
-                    if res.status_code == 200:
-                        content = res.json()["choices"][0]["message"]["content"].strip()
-                        return content
-            except Exception as e:
-                logger.error(f"Gemini LLM generation error: {e}")
+            }
+
+            candidate_models = [self.gemini_model, "gemini-2.5-flash-lite", "gemini-flash-latest", "gemini-2.5-flash"]
+            seen_models = set()
+            models_to_try = [m for m in candidate_models if m and not (m in seen_models or seen_models.add(m))]
+
+            for model_name in models_to_try:
+                try:
+                    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={self.gemini_key}"
+                    async with httpx.AsyncClient(timeout=15.0) as client:
+                        res = await client.post(url, json=payload)
+                        if res.status_code == 200:
+                            data = res.json()
+                            parts = data.get("candidates", [{}])[0].get("content", {}).get("parts", [])
+                            content = "".join(p.get("text", "") for p in parts if isinstance(p, dict)).strip()
+                            if content:
+                                return content.replace("*", "").replace("#", "").replace("`", "")
+                        else:
+                            logger.warning(f"Gemini API model {model_name} returned code {res.status_code}: {res.text}")
+                except Exception as e:
+                    logger.error(f"Gemini LLM generation error with {model_name}: {e}")
 
         # 2. Try Groq API
         if is_valid_key(self.groq_key):
@@ -122,7 +193,7 @@ class LLMAgentService:
                     res = await client.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=payload)
                     if res.status_code == 200:
                         content = res.json()["choices"][0]["message"]["content"].strip()
-                        return content
+                        return content.replace("*", "").replace("#", "")
             except Exception as e:
                 logger.error(f"Groq LLM generation error: {e}")
 
@@ -143,25 +214,60 @@ class LLMAgentService:
                     res = await client.post("https://api.openai.com/v1/chat/completions", headers=headers, json=payload)
                     if res.status_code == 200:
                         content = res.json()["choices"][0]["message"]["content"].strip()
-                        return content
+                        return content.replace("*", "").replace("#", "")
             except Exception as e:
                 logger.error(f"OpenAI LLM generation error: {e}")
 
-        # 4. Fallback empathetic response engine for offline / testing mode
-        last_user_msg = ""
-        for m in reversed(messages):
-            if m.get("role") == "user":
-                last_user_msg = m.get("content", "").lower()
-                break
+        # 4. Contextual Multi-Turn Caregiver Fallback Engine
+        user_msgs = [m.get("content", "").strip() for m in messages if m.get("role") == "user"]
+        last_user_msg = (user_msgs[-1] if user_msgs else "").lower()
+        turn_count = len(user_msgs)
 
-        if "pain" in last_user_msg or "hurt" in last_user_msg:
-            return f"I am so sorry to hear that, {user_name}. Please take it easy and rest. Have you taken your morning medicine yet?"
-        elif "yes" in last_user_msg and ("medicine" in last_user_msg or "pill" in last_user_msg or "took" in last_user_msg):
+        # Detect negations (e.g. "not feeling well", "don't feel good", "not doing well")
+        has_negation = any(neg in last_user_msg for neg in ["not", "don't", "dont", "no", "never", "hardly", "barely", "isn't", "isnt", "won't", "wont"])
+
+        # 1. Doctor consultation / medical triage intent
+        if any(w in last_user_msg for w in ["doctor", "physician", "consult", "clinic", "hospital", "ambulance", "nurse", "er", "emergency"]):
+            return f"I am so sorry you are not feeling well, {user_name}. If your symptoms feel concerning or persistent, consulting your doctor is definitely a wise choice. What symptoms are you experiencing right now?"
+
+        # 2. Illness / Not feeling well (with negation handling)
+        elif (has_negation and any(w in last_user_msg for w in ["well", "good", "fine", "great", "better", "alright"])) or any(w in last_user_msg for w in ["sick", "dizzy", "nausea", "nauseous", "fever", "cough", "weak", "unwell", "awful", "terrible", "bad"]):
+            return f"I am so sorry to hear you are not feeling well, {user_name}. Please sit down comfortably and rest. Are you having any specific pain, or would you like to consult your doctor?"
+
+        # 3. Pain / Aches
+        elif any(w in last_user_msg for w in ["pain", "hurt", "hurts", "hurting", "sore", "aching", "ache", "back", "knee", "headache", "chest"]):
+            return f"I am so sorry to hear you are having pain, {user_name}. Please take it easy and rest. Have you taken your prescribed medicine today?"
+
+        # 4. Emotional distress / loneliness
+        elif any(w in last_user_msg for w in ["down", "sad", "lonely", "unhappy", "depressed", "blue", "crying", "upset", "low", "bad day", "scared", "worried", "anxious"]):
+            return f"I am so sorry you are feeling down today, {user_name}. Please know I am right here with you. Would you like to tell me what's on your mind?"
+
+        # 5. Positive updates (ONLY when NO negation is present!)
+        elif not has_negation and any(w in last_user_msg for w in ["well", "good", "fine", "great", "wonderful", "better", "alright"]):
+            if turn_count <= 1:
+                return f"I am so glad to hear you are doing well, {user_name}! Have you had a chance to take your prescribed medicine today?"
+            else:
+                return f"That is wonderful to hear, {user_name}! Is there anything else on your mind today, or anything you would like to share?"
+
+        # 6. Medication taken confirmation
+        elif ("yes" in last_user_msg or "took" in last_user_msg or "taken" in last_user_msg) and any(w in last_user_msg for w in ["medicine", "pill", "dose", "already", "medication"]):
             return f"Wonderful news, {user_name}! I am glad you took your medicine. How did you sleep last night?"
-        elif "sleep" in last_user_msg or "tired" in last_user_msg:
-            return f"I understand, {user_name}. Getting enough rest is so important. Make sure to drink some water and stay comfortable today."
+
+        # 7. Sleep / fatigue
+        elif any(w in last_user_msg for w in ["sleep", "tired", "insomnia", "exhausted", "rest"]):
+            return f"I understand, {user_name}. Getting good rest is so important for your health. Is there anything else you would like to tell me today?"
+
+        # 8. Closing conversation
+        elif last_user_msg.startswith("no") and (len(last_user_msg) < 20 or any(w in last_user_msg for w in ["nothing", "else", "all", "good", "bye"])):
+            return f"Alright, {user_name}! Thank you so much for chatting with me today. Have a lovely rest of your day, and remember I am always here for you."
+
+        # 9. Multi-turn continuation
+        elif turn_count > 1:
+            return f"Thank you for sharing that with me, {user_name}. How can I best support you today?"
+
+        # 10. Initial greeting
         else:
-            return f"Hello {user_name}! It is wonderful to speak with you today. How are you feeling this morning?"
+            return f"Hello {user_name}! It is wonderful to speak with you today. How are you feeling this {time_of_day.lower()}?"
 
     async def generate_proactive_outreach(
         self,
@@ -169,6 +275,7 @@ class LLMAgentService:
         user_age: int,
         reason_type: str,  # 'medication_due' or '3_hour_checkin'
         details: str = "",
+        health_history: Optional[List[Any]] = None,
         time_of_day: str = "Daytime"
     ) -> str:
         """
@@ -180,15 +287,47 @@ class LLMAgentService:
             else "Routine 3-Hour Daytime Wellness Check-in"
         )
 
+        history_summary = "No recent complaints"
+        if health_history:
+            history_summary = ", ".join([f"{h.pain}" for h in health_history if getattr(h, "pain", None)]) or history_summary
+
         prompt_content = PROACTIVE_PROMPT_TEMPLATE.format(
             user_name=user_name,
             user_age=user_age,
             reason_description=reason_desc,
-            details=details
+            details=details,
+            health_history_info=history_summary
         )
 
-        # 1. Try Groq
-        if self.groq_key:
+        # 1. Try Gemini
+        if is_valid_key(self.gemini_key):
+            candidate_models = [self.gemini_model, "gemini-2.5-flash-lite", "gemini-flash-latest", "gemini-2.5-flash"]
+            seen_models = set()
+            models_to_try = [m for m in candidate_models if m and not (m in seen_models or seen_models.add(m))]
+            payload = {
+                "contents": [{"parts": [{"text": prompt_content}]}],
+                "generationConfig": {
+                    "temperature": 0.7,
+                    "maxOutputTokens": 150,
+                    "thinkingConfig": {"thinkingBudget": 0}
+                }
+            }
+            for model_name in models_to_try:
+                try:
+                    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={self.gemini_key}"
+                    async with httpx.AsyncClient(timeout=10.0) as client:
+                        res = await client.post(url, json=payload)
+                        if res.status_code == 200:
+                            data = res.json()
+                            parts = data.get("candidates", [{}])[0].get("content", {}).get("parts", [])
+                            content = "".join(p.get("text", "") for p in parts if isinstance(p, dict)).strip()
+                            if content:
+                                return content.replace("*", "").replace("#", "").replace("`", "")
+                except Exception as e:
+                    logger.error(f"Gemini proactive generation error with {model_name}: {e}")
+
+        # 2. Try Groq
+        if is_valid_key(self.groq_key):
             try:
                 headers = {"Authorization": f"Bearer {self.groq_key}", "Content-Type": "application/json"}
                 payload = {
@@ -200,12 +339,12 @@ class LLMAgentService:
                 async with httpx.AsyncClient(timeout=8.0) as client:
                     res = await client.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=payload)
                     if res.status_code == 200:
-                        return res.json()["choices"][0]["message"]["content"].strip()
+                        return res.json()["choices"][0]["message"]["content"].strip().replace("*", "")
             except Exception as e:
                 logger.error(f"Groq proactive generation error: {e}")
 
-        # 2. Try OpenAI
-        if self.openai_key:
+        # 3. Try OpenAI
+        if is_valid_key(self.openai_key):
             try:
                 headers = {"Authorization": f"Bearer {self.openai_key}", "Content-Type": "application/json"}
                 payload = {
@@ -217,11 +356,11 @@ class LLMAgentService:
                 async with httpx.AsyncClient(timeout=8.0) as client:
                     res = await client.post("https://api.openai.com/v1/chat/completions", headers=headers, json=payload)
                     if res.status_code == 200:
-                        return res.json()["choices"][0]["message"]["content"].strip()
+                        return res.json()["choices"][0]["message"]["content"].strip().replace("*", "")
             except Exception as e:
                 logger.error(f"OpenAI proactive generation error: {e}")
 
-        # 3. Empathetic Fallback rule-based proactive prompts
+        # 4. Empathetic Fallback rule-based proactive prompts
         if reason_type == "medication_due":
             return f"Hello {user_name}! It is time for your prescribed medicine: {details}. Have you taken your dose yet?"
         else:

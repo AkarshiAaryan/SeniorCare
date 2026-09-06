@@ -52,16 +52,22 @@ class VoiceOrchestrator:
         conv_history = history or []
         conv_history.append({"role": "user", "content": user_text})
 
-        # Fetch user medications
+        # Fetch user medications and recent health telemetry
         user_meds = db.query(models.Medication).filter(models.Medication.user_id == user_id).all()
         med_names = [m.name for m in user_meds]
+        recent_health = db.query(models.HealthRecord).filter(models.HealthRecord.user_id == user_id).order_by(models.HealthRecord.timestamp.desc()).limit(5).all()
 
-        # 3. LLM Response Generation
+        current_hour = datetime.now().hour
+        time_of_day = "Morning" if current_hour < 12 else ("Afternoon" if current_hour < 18 else "Evening")
+
+        # 3. LLM Response Generation with full context
         ai_response_text = await llm_agent.generate_response(
             messages=conv_history,
             user_name=user.name,
             user_age=user.age,
-            medications=user_meds
+            medications=user_meds,
+            health_history=recent_health,
+            time_of_day=time_of_day
         )
 
         conv_history.append({"role": "assistant", "content": ai_response_text})
