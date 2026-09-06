@@ -153,19 +153,24 @@ class RimeTTSService:
             "Accept": audio_format
         }
 
-        if not self.api_key:
-            logger.warning("RIME_API_KEY is not set. Streaming mock audio chunk.")
+        if not is_valid_key(self.api_key):
+            logger.warning("RIME_API_KEY is not set or placeholder. Streaming fallback audio chunk.")
             yield b"\xFF\xFB\x90\x64\x00\x00\x00\x00MockRimeAudioStreamData"
             return
 
-        async with httpx.AsyncClient(timeout=20.0) as client:
-            async with client.stream("POST", self.api_url, json=payload, headers=headers) as response:
-                if response.status_code != 200:
-                    error_body = await response.aread()
-                    logger.error(f"Rime Stream Error {response.status_code}: {error_body.decode('utf-8', errors='ignore')}")
-                    response.raise_for_status()
-                async for chunk in response.aiter_bytes():
-                    yield chunk
+        try:
+            async with httpx.AsyncClient(timeout=20.0) as client:
+                async with client.stream("POST", self.api_url, json=payload, headers=headers) as response:
+                    if response.status_code == 200:
+                        async for chunk in response.aiter_bytes():
+                            yield chunk
+                    else:
+                        error_body = await response.aread()
+                        logger.warning(f"Rime Stream Error {response.status_code}: {error_body.decode('utf-8', errors='ignore')}")
+                        yield b"\xFF\xFB\x90\x64\x00\x00\x00\x00MockRimeAudioStreamData"
+        except Exception as e:
+            logger.error(f"Failed to communicate with Rime Stream API: {e}")
+            yield b"\xFF\xFB\x90\x64\x00\x00\x00\x00MockRimeAudioStreamData"
 
 
 rime_service = RimeTTSService()
