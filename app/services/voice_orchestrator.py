@@ -21,13 +21,14 @@ class VoiceOrchestrator:
         user_id: int,
         audio_bytes: Optional[bytes] = None,
         text_input: Optional[str] = None,
+        filename: str = "audio.wav",
         history: Optional[List[Dict[str, str]]] = None,
         speaker: Optional[str] = None,
         speed: Optional[float] = None
     ) -> Dict[str, Any]:
         """
         Processes a full conversational voice turn:
-        1. Transcribe audio if provided, else use text_input.
+        1. Use text_input if provided (e.g. from client live STT), or transcribe audio.
         2. Fetch user profile, prescribed medications, and context from DB.
         3. Generate empathetic 'Writing for the Ear' response via LLM.
         4. Synthesize spoken audio using Rime TTS.
@@ -39,13 +40,12 @@ class VoiceOrchestrator:
         if not user:
             raise ValueError(f"User with ID {user_id} not found.")
 
-        # 1. Speech-to-Text
-        if audio_bytes and len(audio_bytes) > 0:
-            user_text = await stt_service.transcribe(audio_bytes, filename=f"user_{user_id}.wav")
-        else:
-            user_text = text_input or ""
+        # 1. Speech-to-Text / Input Resolution
+        user_text = (text_input or "").strip()
+        if not user_text and audio_bytes and len(audio_bytes) > 0:
+            user_text = await stt_service.transcribe(audio_bytes, filename=filename)
 
-        if not user_text.strip():
+        if not user_text or not user_text.strip():
             user_text = "Hello Elena, I am here."
 
         # 2. Build conversation history

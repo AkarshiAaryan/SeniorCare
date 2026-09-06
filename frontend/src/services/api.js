@@ -143,10 +143,19 @@ export async function processVoiceTurn(userId, textInput, history = []) {
   return res.json();
 }
 
-export async function processAudioTurn(userId, audioBlob, history = []) {
+export async function processAudioTurn(userId, audioBlob, history = [], textInput = '') {
   const formData = new FormData();
   formData.append('user_id', userId);
-  formData.append('audio_file', audioBlob, 'mic_recording.wav');
+  
+  if (textInput && textInput.trim()) {
+    formData.append('text_input', textInput.trim());
+  }
+
+  if (audioBlob) {
+    const ext = audioBlob.type && audioBlob.type.includes('webm') ? 'webm' : (audioBlob.type && audioBlob.type.includes('ogg') ? 'ogg' : 'wav');
+    formData.append('audio_file', audioBlob, `mic_recording.${ext}`);
+  }
+
   if (history && history.length > 0) {
     formData.append('history_json', JSON.stringify(history));
   }

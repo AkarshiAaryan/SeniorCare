@@ -70,5 +70,7 @@ venv.bak/
 node_modules/
 frontend/node_modules/
 frontend/dist/
+frontend/.vite/
+.vite/
 .env.local
 .env.*.local

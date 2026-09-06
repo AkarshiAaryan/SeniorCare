@@ -23,6 +23,19 @@ class STTService:
         if not audio_bytes or len(audio_bytes) == 0:
             return ""
 
+        # Determine MIME type from filename
+        fn_lower = (filename or "").lower()
+        if fn_lower.endswith(".webm"):
+            mime_type = "audio/webm"
+        elif fn_lower.endswith(".ogg"):
+            mime_type = "audio/ogg"
+        elif fn_lower.endswith(".mp3"):
+            mime_type = "audio/mp3"
+        elif fn_lower.endswith(".m4a") or fn_lower.endswith(".mp4"):
+            mime_type = "audio/mp4"
+        else:
+            mime_type = "audio/wav"
+
         preferred_providers = [self.provider] if self.provider else ["gemini", "groq", "openai"]
         if self.provider not in {"gemini", "groq", "openai", "mock"}:
             preferred_providers = ["gemini", "groq", "openai", "mock"]
@@ -40,7 +53,7 @@ class STTService:
                                 },
                                 {
                                     "inlineData": {
-                                        "mimeType": "audio/wav",
+                                        "mimeType": mime_type,
                                         "data": base64.b64encode(audio_bytes).decode("utf-8")
                                     }
                                 }
@@ -66,7 +79,7 @@ class STTService:
                     continue
                 try:
                     headers = {"Authorization": f"Bearer {self.groq_key}"}
-                    files = {"file": (filename, audio_bytes, "audio/wav")}
+                    files = {"file": (filename, audio_bytes, mime_type)}
                     data = {
                         "model": "whisper-large-v3",
                         "language": language,
@@ -80,7 +93,9 @@ class STTService:
                             data=data
                         )
                         if res.status_code == 200:
-                            return res.json().get("text", "").strip()
+                            transcript = res.json().get("text", "").strip()
+                            if transcript:
+                                return transcript
                         else:
                             logger.warning(f"Groq STT failed with code {res.status_code}: {res.text}")
                 except Exception as e:
@@ -91,7 +106,7 @@ class STTService:
                     continue
                 try:
                     headers = {"Authorization": f"Bearer {self.openai_key}"}
-                    files = {"file": (filename, audio_bytes, "audio/wav")}
+                    files = {"file": (filename, audio_bytes, mime_type)}
                     data = {
                         "model": "whisper-1",
                         "language": language
@@ -104,7 +119,9 @@ class STTService:
                             data=data
                         )
                         if res.status_code == 200:
-                            return res.json().get("text", "").strip()
+                            transcript = res.json().get("text", "").strip()
+                            if transcript:
+                                return transcript
                         else:
                             logger.warning(f"OpenAI STT failed with code {res.status_code}: {res.text}")
                 except Exception as e:
