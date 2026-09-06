@@ -23,7 +23,7 @@ class Settings:
     LLM_MODEL: str = os.getenv("LLM_MODEL", "gpt-4o-mini")
     
     # STT Settings
-    STT_PROVIDER: str = os.getenv("STT_PROVIDER", "openai")  # 'openai', 'groq', or 'mock'
+    STT_PROVIDER: str = os.getenv("STT_PROVIDER", "gemini")  # 'gemini', 'openai', 'groq', or 'mock'
 
 
 settings = Settings()
