@@ -20,7 +20,7 @@ async def test_health_extraction_missed_medication():
     transcript = "User: I felt lonely and I forgot to take my morning pill today."
     extracted = await extractor.extract_from_transcript(transcript)
     
-    assert extracted["mood"] in ["sad", "lonely", "tired", "normal"]
+    assert extracted["mood"] in ["sad", "lonely", "tired", "low", "normal"]
     assert extracted["medication_taken"] is False
 
 

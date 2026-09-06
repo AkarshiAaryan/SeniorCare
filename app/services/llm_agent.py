@@ -126,38 +126,55 @@ class LLMAgentService:
 
         # 1. Try Gemini API (Native Google REST Endpoint)
         if is_valid_key(self.gemini_key):
-            try:
-                contents = []
-                for m in messages:
-                    role = "model" if m.get("role") == "assistant" else "user"
+            contents = []
+            for m in messages:
+                role = "model" if m.get("role") == "assistant" else "user"
+                # Skip leading assistant message since Gemini requires first turn to be 'user'
+                if not contents and role == "model":
+                    continue
+                # Merge consecutive same-role messages
+                if contents and contents[-1]["role"] == role:
+                    contents[-1]["parts"][0]["text"] += "\n" + m.get("content", "")
+                else:
                     contents.append({
                         "role": role,
                         "parts": [{"text": m.get("content", "")}]
                     })
 
-                payload = {
-                    "systemInstruction": {
-                        "parts": [{"text": system_instruction}]
-                    },
-                    "contents": contents,
-                    "generationConfig": {
-                        "temperature": 0.7,
-                        "maxOutputTokens": 150
-                    }
+            if not contents:
+                contents = [{"role": "user", "parts": [{"text": "Hello Elena"}]}]
+
+            payload = {
+                "systemInstruction": {
+                    "parts": [{"text": system_instruction}]
+                },
+                "contents": contents,
+                "generationConfig": {
+                    "temperature": 0.7,
+                    "maxOutputTokens": 300,
+                    "thinkingConfig": {"thinkingBudget": 0}
                 }
-                url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.gemini_model}:generateContent?key={self.gemini_key}"
-                async with httpx.AsyncClient(timeout=15.0) as client:
-                    res = await client.post(url, json=payload)
-                    if res.status_code == 200:
-                        data = res.json()
-                        parts = data.get("candidates", [{}])[0].get("content", {}).get("parts", [])
-                        content = "".join(p.get("text", "") for p in parts if isinstance(p, dict)).strip()
-                        if content:
-                            return content.replace("*", "").replace("#", "").replace("`", "")
-                    else:
-                        logger.warning(f"Gemini API returned code {res.status_code}: {res.text}")
-            except Exception as e:
-                logger.error(f"Gemini LLM generation error: {e}")
+            }
+
+            candidate_models = [self.gemini_model, "gemini-2.5-flash", "gemini-1.5-flash-latest"]
+            seen_models = set()
+            models_to_try = [m for m in candidate_models if m and not (m in seen_models or seen_models.add(m))]
+
+            for model_name in models_to_try:
+                try:
+                    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={self.gemini_key}"
+                    async with httpx.AsyncClient(timeout=15.0) as client:
+                        res = await client.post(url, json=payload)
+                        if res.status_code == 200:
+                            data = res.json()
+                            parts = data.get("candidates", [{}])[0].get("content", {}).get("parts", [])
+                            content = "".join(p.get("text", "") for p in parts if isinstance(p, dict)).strip()
+                            if content:
+                                return content.replace("*", "").replace("#", "").replace("`", "")
+                        else:
+                            logger.warning(f"Gemini API model {model_name} returned code {res.status_code}: {res.text}")
+                except Exception as e:
+                    logger.error(f"Gemini LLM generation error with {model_name}: {e}")
 
         # 2. Try Groq API
         if is_valid_key(self.groq_key):
@@ -206,21 +223,26 @@ class LLMAgentService:
         last_user_msg = (user_msgs[-1] if user_msgs else "").lower()
         turn_count = len(user_msgs)
 
-        if "pain" in last_user_msg or "hurt" in last_user_msg or "sore" in last_user_msg:
-            return f"I am so sorry to hear that, {user_name}. Please take it easy and rest. Have you taken your prescribed medicine yet?"
-        elif "well" in last_user_msg or "good" in last_user_msg or "fine" in last_user_msg or "great" in last_user_msg:
+        # Empathetic emotional recognition
+        if any(w in last_user_msg for w in ["down", "sad", "lonely", "unhappy", "depressed", "blue", "crying", "upset", "low", "bad day"]):
+            return f"I am so sorry you are feeling down today, {user_name}. Please know I am right here with you. Would you like to tell me what's on your mind?"
+        elif any(w in last_user_msg for w in ["pain", "hurt", "sore", "aching", "back", "knee", "headache"]):
+            return f"I am so sorry to hear you are having pain, {user_name}. Please take it easy and rest. Have you taken your prescribed medicine today?"
+        elif any(w in last_user_msg for w in ["sick", "dizzy", "nausea", "fever", "cough", "weak", "unwell"]):
+            return f"I am sorry you are not feeling well, {user_name}. Please sit comfortably and sip some water. Have you taken your medicine today?"
+        elif any(w in last_user_msg for w in ["well", "good", "fine", "great", "wonderful", "better", "alright"]):
             if turn_count <= 1:
                 return f"I am so glad to hear you are doing well, {user_name}! Have you had a chance to take your prescribed medicine today?"
             else:
                 return f"That is wonderful to hear, {user_name}! Is there anything else on your mind today, or anything you would like to share?"
-        elif "yes" in last_user_msg and ("medicine" in last_user_msg or "pill" in last_user_msg or "took" in last_user_msg or "taken" in last_user_msg):
+        elif "yes" in last_user_msg and any(w in last_user_msg for w in ["medicine", "pill", "took", "taken", "dose", "already"]):
             return f"Wonderful news, {user_name}! I am glad you took your medicine. How did you sleep last night?"
-        elif "sleep" in last_user_msg or "tired" in last_user_msg or "insomnia" in last_user_msg:
-            return f"I understand, {user_name}. Getting enough rest is so important. Is there anything else you would like to tell me today?"
-        elif "no" in last_user_msg and ("nothing" in last_user_msg or "else" in last_user_msg or len(last_user_msg) < 15):
-            return f"Alright, {user_name}! Thank you for chatting with me today. Have a lovely day, and remember I am always here for you."
+        elif any(w in last_user_msg for w in ["sleep", "tired", "insomnia", "exhausted", "rest"]):
+            return f"I understand, {user_name}. Getting good rest is so important for your health. Is there anything else you would like to tell me today?"
+        elif "no" in last_user_msg and (len(last_user_msg) < 20 or any(w in last_user_msg for w in ["nothing", "else", "all", "good"])):
+            return f"Alright, {user_name}! Thank you so much for chatting with me today. Have a lovely rest of your day, and remember I am always here for you."
         elif turn_count > 1:
-            return f"Thank you for sharing that with me, {user_name}. Is there anything else on your mind today?"
+            return f"Thank you for sharing that with me, {user_name}. How can I best support you today?"
         else:
             return f"Hello {user_name}! It is wonderful to speak with you today. How are you feeling this {time_of_day.lower()}?"
 
@@ -256,25 +278,30 @@ class LLMAgentService:
 
         # 1. Try Gemini
         if is_valid_key(self.gemini_key):
-            try:
-                url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.gemini_model}:generateContent?key={self.gemini_key}"
-                payload = {
-                    "contents": [{"parts": [{"text": prompt_content}]}],
-                    "generationConfig": {
-                        "temperature": 0.7,
-                        "maxOutputTokens": 80
-                    }
+            candidate_models = [self.gemini_model, "gemini-2.5-flash", "gemini-1.5-flash-latest"]
+            seen_models = set()
+            models_to_try = [m for m in candidate_models if m and not (m in seen_models or seen_models.add(m))]
+            payload = {
+                "contents": [{"parts": [{"text": prompt_content}]}],
+                "generationConfig": {
+                    "temperature": 0.7,
+                    "maxOutputTokens": 150,
+                    "thinkingConfig": {"thinkingBudget": 0}
                 }
-                async with httpx.AsyncClient(timeout=10.0) as client:
-                    res = await client.post(url, json=payload)
-                    if res.status_code == 200:
-                        data = res.json()
-                        parts = data.get("candidates", [{}])[0].get("content", {}).get("parts", [])
-                        content = "".join(p.get("text", "") for p in parts if isinstance(p, dict)).strip()
-                        if content:
-                            return content.replace("*", "").replace("#", "")
-            except Exception as e:
-                logger.error(f"Gemini proactive generation error: {e}")
+            }
+            for model_name in models_to_try:
+                try:
+                    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={self.gemini_key}"
+                    async with httpx.AsyncClient(timeout=10.0) as client:
+                        res = await client.post(url, json=payload)
+                        if res.status_code == 200:
+                            data = res.json()
+                            parts = data.get("candidates", [{}])[0].get("content", {}).get("parts", [])
+                            content = "".join(p.get("text", "") for p in parts if isinstance(p, dict)).strip()
+                            if content:
+                                return content.replace("*", "").replace("#", "").replace("`", "")
+                except Exception as e:
+                    logger.error(f"Gemini proactive generation error with {model_name}: {e}")
 
         # 2. Try Groq
         if is_valid_key(self.groq_key):

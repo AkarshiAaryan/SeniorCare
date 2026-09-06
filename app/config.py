@@ -17,10 +17,10 @@ class Settings:
 
     # LLM / Intelligence Settings
     GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
-    GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
+    GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
     GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
-    LLM_MODEL: str = os.getenv("LLM_MODEL", "gemini-3.6-flash")
+    LLM_MODEL: str = os.getenv("LLM_MODEL", "gemini-2.5-flash")
     
     # STT Settings
     STT_PROVIDER: str = os.getenv("STT_PROVIDER", "gemini")  # 'gemini', 'openai', 'groq', or 'mock'
