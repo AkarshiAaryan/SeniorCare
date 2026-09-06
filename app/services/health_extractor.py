@@ -60,27 +60,33 @@ class HealthExtractorService:
 
         prompt_user = f"Known medications: {known_medications or []}\n\nTranscript:\n{transcript}"
 
-        # 1. Try Gemini API JSON extraction
+        # 1. Try Gemini API JSON extraction (Native Google REST Endpoint)
         if is_valid_key(self.gemini_key):
             try:
-                headers = {
-                    "Authorization": f"Bearer {self.gemini_key}",
-                    "Content-Type": "application/json"
-                }
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.gemini_model}:generateContent?key={self.gemini_key}"
                 payload = {
-                    "model": self.gemini_model,
-                    "messages": [
-                        {"role": "system", "content": EXTRACTION_SYSTEM_PROMPT},
-                        {"role": "user", "content": prompt_user}
-                    ],
-                    "response_format": {"type": "json_object"},
-                    "temperature": 0.1
+                    "systemInstruction": {
+                        "parts": [{"text": EXTRACTION_SYSTEM_PROMPT}]
+                    },
+                    "contents": [{
+                        "role": "user",
+                        "parts": [{"text": prompt_user}]
+                    }],
+                    "generationConfig": {
+                        "responseMimeType": "application/json",
+                        "temperature": 0.1
+                    }
                 }
-                async with httpx.AsyncClient(timeout=10.0) as client:
-                    res = await client.post("https://generativelanguage.googleapis.com/v1beta/openai/chat/completions", headers=headers, json=payload)
+                async with httpx.AsyncClient(timeout=12.0) as client:
+                    res = await client.post(url, json=payload)
                     if res.status_code == 200:
-                        content = res.json()["choices"][0]["message"]["content"]
-                        return json.loads(content)
+                        data = res.json()
+                        parts = data.get("candidates", [{}])[0].get("content", {}).get("parts", [])
+                        content = "".join(p.get("text", "") for p in parts if isinstance(p, dict)).strip()
+                        if content:
+                            return json.loads(content)
+                    else:
+                        logger.warning(f"Gemini extraction returned code {res.status_code}: {res.text}")
             except Exception as e:
                 logger.error(f"Gemini Extraction error: {e}")
 

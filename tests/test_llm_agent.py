@@ -16,6 +16,9 @@ def test_llm_prompt_structure():
 @pytest.mark.asyncio
 async def test_llm_agent_fallback_pain():
     agent = LLMAgentService()
+    agent.gemini_key = ""
+    agent.groq_key = ""
+    agent.openai_key = ""
     messages = [{"role": "user", "content": "My knee really hurts today."}]
     response = await agent.generate_response(messages=messages, user_name="Arthur", user_age=80)
     
@@ -26,6 +29,9 @@ async def test_llm_agent_fallback_pain():
 @pytest.mark.asyncio
 async def test_llm_agent_fallback_medicine_confirmation():
     agent = LLMAgentService()
+    agent.gemini_key = ""
+    agent.groq_key = ""
+    agent.openai_key = ""
     messages = [{"role": "user", "content": "Yes, I took my morning medicine."}]
     response = await agent.generate_response(messages=messages, user_name="Arthur", user_age=80)
     
