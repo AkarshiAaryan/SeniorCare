@@ -8,6 +8,7 @@ export default function VoiceModal({ isOpen, onClose, user, onUpdate, initialAss
   const [liveTranscript, setLiveTranscript] = useState('');
   const [transcript, setTranscript] = useState('');
   const [assistantText, setAssistantText] = useState('Hello! I am Elena, your voice care assistant. How are you feeling today?');
+  const [currentAudioBase64, setCurrentAudioBase64] = useState(null);
   const [history, setHistory] = useState([]);
   const [customText, setCustomText] = useState('');
   const [statusMessage, setStatusMessage] = useState('Tap the microphone to speak');
@@ -21,16 +22,17 @@ export default function VoiceModal({ isOpen, onClose, user, onUpdate, initialAss
     if (isOpen) {
       if (initialAssistantText) {
         setAssistantText(initialAssistantText);
+        setCurrentAudioBase64(initialAudioBase64 || null);
         setHistory([{ role: 'assistant', content: initialAssistantText }]);
         setStatusMessage('Elena is speaking to you. Tap mic when ready to respond.');
-        if (initialAudioBase64) {
-          playRimeAudio(initialAudioBase64).catch(e => console.warn('Audio auto-play note:', e));
-        }
+        playRimeAudio(initialAudioBase64, initialAssistantText).catch(e => console.warn('Audio auto-play note:', e));
       } else {
         const welcome = `Hello ${user?.name || 'Friend'}! I am Elena. How are you feeling today?`;
         setAssistantText(welcome);
+        setCurrentAudioBase64(null);
         setHistory([{ role: 'assistant', content: welcome }]);
         setStatusMessage('Tap the microphone to speak');
+        playRimeAudio(null, welcome).catch(e => console.warn('Audio auto-play note:', e));
       }
       setTranscript('');
       setLiveTranscript('');
@@ -43,6 +45,9 @@ export default function VoiceModal({ isOpen, onClose, user, onUpdate, initialAss
       if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
         try { mediaRecorderRef.current.stop(); } catch {}
       }
+      if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+        try { window.speechSynthesis.cancel(); } catch {}
+      }
     }
   }, [isOpen, user, initialAssistantText, initialAudioBase64]);
 
@@ -53,6 +58,11 @@ export default function VoiceModal({ isOpen, onClose, user, onUpdate, initialAss
       audioChunksRef.current = [];
       setLiveTranscript('');
       finalTranscriptRef.current = '';
+
+      // Stop any active speech synthesis when the user begins talking
+      if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+        try { window.speechSynthesis.cancel(); } catch {}
+      }
 
       // 1. Initialize Browser Web Speech API for real-time live on-screen text
       const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -147,11 +157,10 @@ export default function VoiceModal({ isOpen, onClose, user, onUpdate, initialAss
       setTranscript(spokenByUser);
       setLiveTranscript('');
       setAssistantText(result.assistant_text);
+      setCurrentAudioBase64(result.audio_base64 || null);
       setHistory(result.history);
       setStatusMessage('Elena responded!');
-      if (result.audio_base64) {
-        await playRimeAudio(result.audio_base64);
-      }
+      await playRimeAudio(result.audio_base64, result.assistant_text);
       if (onUpdate) onUpdate();
     } catch (err) {
       console.error('Voice turn error:', err);
@@ -162,11 +171,10 @@ export default function VoiceModal({ isOpen, onClose, user, onUpdate, initialAss
           setTranscript(liveCapturedText);
           setLiveTranscript('');
           setAssistantText(fallbackRes.assistant_text);
+          setCurrentAudioBase64(fallbackRes.audio_base64 || null);
           setHistory(fallbackRes.history);
           setStatusMessage('Elena responded!');
-          if (fallbackRes.audio_base64) {
-            await playRimeAudio(fallbackRes.audio_base64);
-          }
+          await playRimeAudio(fallbackRes.audio_base64, fallbackRes.assistant_text);
           if (onUpdate) onUpdate();
           return;
         } catch {}
@@ -190,11 +198,10 @@ export default function VoiceModal({ isOpen, onClose, user, onUpdate, initialAss
     try {
       const result = await processVoiceTurn(user.id, text, history);
       setAssistantText(result.assistant_text);
+      setCurrentAudioBase64(result.audio_base64 || null);
       setHistory(result.history);
       setStatusMessage('Elena responded!');
-      if (result.audio_base64) {
-        await playRimeAudio(result.audio_base64);
-      }
+      await playRimeAudio(result.audio_base64, result.assistant_text);
       if (onUpdate) onUpdate();
     } catch (err) {
       console.error('Text voice turn error:', err);
@@ -236,9 +243,14 @@ export default function VoiceModal({ isOpen, onClose, user, onUpdate, initialAss
                 <Volume2 className="w-5 h-5 text-emerald-600 animate-pulse" />
                 <span>ELENA SAYS:</span>
               </div>
-              <span className="text-xs font-semibold px-2.5 py-0.5 bg-emerald-200/60 rounded-full text-emerald-800">
-                Spoken Aloud
-              </span>
+              <button
+                onClick={() => playRimeAudio(currentAudioBase64, assistantText)}
+                className="px-3 py-1.5 bg-emerald-700 hover:bg-emerald-800 text-white rounded-lg text-xs font-bold flex items-center gap-1.5 cursor-pointer shadow transition active:scale-95"
+                title="Hear Elena speak aloud"
+              >
+                <Volume2 className="w-3.5 h-3.5" />
+                <span>Hear Aloud</span>
+              </button>
             </div>
             <p className="text-2xl md:text-3xl font-semibold text-slate-800 leading-snug">
               "{assistantText}"

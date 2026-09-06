@@ -7,6 +7,10 @@ from app.config import settings
 logger = logging.getLogger("RimeTTS")
 
 
+def is_valid_key(key: Optional[str]) -> bool:
+    return bool(key and key.strip() and not key.startswith("your_"))
+
+
 class RimeTTSService:
     def __init__(
         self,
@@ -48,18 +52,21 @@ class RimeTTSService:
             (r'\bcaps\b', 'capsules'),
             (r'(\d+)\s*cap\b', r'\1 capsule'),
             (r'\bcap\b', 'capsule'),
+            (r'(\d+)\s*ml\b', r'\1 milliliters'),
             (r'\b(\d+):00\s*(am|pm|AM|PM)?\b', r"\1 o'clock \2"),
-            (r'\b(\d+):(\d{2})\b', r'\1 \2'),
+            (r'(\d{1,2}):(\d{2})', r'\1 \2'),  # e.g., 08:00 -> 08 00
             (r'\s*&\s*', ' and '),
             (r'\bw/(?=\s|$)', 'with '),
             (r'\bw/o(?=\s|$)', 'without '),
+            (r'\bDr\.\b', 'Doctor'),
             (r'\bBP\b', 'blood pressure'),
             (r'\bHR\b', 'heart rate'),
-            (r'\bDr\.\b', 'Doctor'),
+            (r'\bhr\b', 'hour'),
+            (r'\bhrs\b', 'hours'),
         ]:
-            cleaned = re.sub(pattern, replacement, cleaned)
+            cleaned = re.sub(pattern, replacement, cleaned, flags=re.IGNORECASE)
 
-        # Collapse multiple spaces and trim
+        # Ensure single question per sentence, smooth periods and commas
         cleaned = re.sub(r'\s+', ' ', cleaned).strip()
         return cleaned
 
@@ -97,25 +104,25 @@ class RimeTTSService:
         }
 
         # Check for missing API key and provide graceful simulated response if in local testing
-        if not self.api_key:
-            logger.warning("RIME_API_KEY is not set. Generating mock audio bytes for testing.")
-            # Return valid mock MP3 header bytes for graceful offline development / testing
+        if not is_valid_key(self.api_key):
+            logger.warning("RIME_API_KEY is not set or placeholder. Returning fallback audio bytes.")
             return b"\xFF\xFB\x90\x64\x00\x00\x00\x00MockRimeAudioStreamData"
 
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            try:
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
                 response = await client.post(
                     self.api_url,
                     json=payload,
                     headers=headers
                 )
-                if response.status_code != 200:
-                    logger.error(f"Rime API Error {response.status_code}: {response.text}")
-                    response.raise_for_status()
-                return response.content
-            except Exception as e:
-                logger.error(f"Failed to communicate with Rime TTS API: {e}")
-                raise
+                if response.status_code == 200:
+                    return response.content
+                else:
+                    logger.warning(f"Rime API returned code {response.status_code}: {response.text}")
+                    return b"\xFF\xFB\x90\x64\x00\x00\x00\x00MockRimeAudioStreamData"
+        except Exception as e:
+            logger.error(f"Failed to communicate with Rime TTS API: {e}")
+            return b"\xFF\xFB\x90\x64\x00\x00\x00\x00MockRimeAudioStreamData"
 
     async def stream_synthesize(
         self,

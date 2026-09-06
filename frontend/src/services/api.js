@@ -188,12 +188,38 @@ export async function triggerProactivePrompt(userId, reasonType = '3_hour_checki
   return res.json();
 }
 
-export async function playRimeAudio(base64Audio) {
-  if (!base64Audio) return;
-  try {
-    const audio = new Audio(`data:audio/mpeg;base64,${base64Audio}`);
-    await audio.play();
-  } catch (err) {
-    console.warn('Audio playback not permitted without prior user gesture or audio error:', err);
+export async function playRimeAudio(base64Audio, textFallback = '') {
+  // 1. If base64Audio from Rime TTS is present and valid audio stream
+  if (base64Audio && base64Audio.length > 200 && !base64Audio.includes('MockRimeAudioStreamData')) {
+    try {
+      const audio = new Audio(`data:audio/mpeg;base64,${base64Audio}`);
+      await audio.play();
+      return;
+    } catch (err) {
+      console.warn('Rime audio element playback failed, falling back to browser SpeechSynthesis:', err);
+    }
+  }
+
+  // 2. Immediate SpeechSynthesis Fallback (Natural, gentle female voice for elderly)
+  if (textFallback && typeof window !== 'undefined' && 'speechSynthesis' in window) {
+    try {
+      window.speechSynthesis.cancel(); // Stop any pending utterances
+      const utterance = new SpeechSynthesisUtterance(textFallback);
+      utterance.rate = 0.95; // Gentle speaking pace for senior clarity
+      utterance.pitch = 1.05; // Friendly, warm pitch
+
+      const voices = window.speechSynthesis.getVoices();
+      const friendlyVoice = voices.find(v => 
+        (v.name.includes('Google') || v.name.includes('Natural') || v.name.includes('Samantha') || v.name.includes('Karen') || v.name.includes('Zira') || v.name.includes('Female')) && v.lang.startsWith('en')
+      ) || voices.find(v => v.lang.startsWith('en'));
+
+      if (friendlyVoice) {
+        utterance.voice = friendlyVoice;
+      }
+
+      window.speechSynthesis.speak(utterance);
+    } catch (synthErr) {
+      console.warn('Speech synthesis playback error:', synthErr);
+    }
   }
 }
