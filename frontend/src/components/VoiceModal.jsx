@@ -12,11 +12,24 @@ export default function VoiceModal({ isOpen, onClose, user, onUpdate, initialAss
   const [history, setHistory] = useState([]);
   const [customText, setCustomText] = useState('');
   const [statusMessage, setStatusMessage] = useState('Tap the microphone to speak');
+  const [currentTurnId, setCurrentTurnId] = useState(null);
 
   const mediaRecorderRef = useRef(null);
   const audioChunksRef = useRef([]);
   const recognitionRef = useRef(null);
   const finalTranscriptRef = useRef('');
+  const activeAudioRef = useRef(null);
+  const turnIdRef = useRef(null);
+
+  const stopCurrentAudio = () => {
+    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+      try { window.speechSynthesis.cancel(); } catch {}
+    }
+    if (activeAudioRef.current) {
+      try { activeAudioRef.current.pause(); } catch {}
+      activeAudioRef.current = null;
+    }
+  };
 
   useEffect(() => {
     if (isOpen) {
@@ -60,9 +73,10 @@ export default function VoiceModal({ isOpen, onClose, user, onUpdate, initialAss
       finalTranscriptRef.current = '';
 
       // Stop any active speech synthesis when the user begins talking
-      if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
-        try { window.speechSynthesis.cancel(); } catch {}
-      }
+      stopCurrentAudio();
+      const nextTurnId = Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
+      turnIdRef.current = nextTurnId;
+      setCurrentTurnId(nextTurnId);
 
       // 1. Initialize Browser Web Speech API for real-time live on-screen text
       const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -123,7 +137,7 @@ export default function VoiceModal({ isOpen, onClose, user, onUpdate, initialAss
       };
 
       mediaRecorder.onstop = async () => {
-        const audioBlob = new Blob(audioChunksRef.current, { type: mimeType });
+          const audioBlob = new Blob(audioChunksRef.current, { type: mimeType });
         const capturedText = finalTranscriptRef.current.trim();
         await handleAudioSubmit(audioBlob, capturedText);
         stream.getTracks().forEach((track) => track.stop());
@@ -152,7 +166,14 @@ export default function VoiceModal({ isOpen, onClose, user, onUpdate, initialAss
 
   const handleAudioSubmit = async (audioBlob, liveCapturedText) => {
     try {
-      const result = await processAudioTurn(user.id, audioBlob, history, liveCapturedText);
+      const activeTurnId = turnIdRef.current || currentTurnId;
+      const result = await processAudioTurn(user.id, audioBlob, history, liveCapturedText, activeTurnId);
+
+      if (result.stale) {
+        setStatusMessage('Newest instruction received. Discarding older response.');
+        return;
+      }
+
       const spokenByUser = liveCapturedText || result.user_text;
       setTranscript(spokenByUser);
       setLiveTranscript('');
@@ -160,21 +181,37 @@ export default function VoiceModal({ isOpen, onClose, user, onUpdate, initialAss
       setCurrentAudioBase64(result.audio_base64 || null);
       setHistory(result.history);
       setStatusMessage('Elena responded!');
-      await playRimeAudio(result.audio_base64, result.assistant_text);
+      stopCurrentAudio();
+      const audio = await playRimeAudio(result.audio_base64, result.assistant_text, () => {
+        if (activeAudioRef.current && activeAudioRef.current.src === audio?.src) {
+          activeAudioRef.current = null;
+        }
+      });
+      activeAudioRef.current = audio;
       if (onUpdate) onUpdate();
     } catch (err) {
       console.error('Voice turn error:', err);
-      // Fallback: if we have live captured text, try processVoiceTurn directly
       if (liveCapturedText) {
         try {
-          const fallbackRes = await processVoiceTurn(user.id, liveCapturedText, history);
+          const activeTurnId = turnIdRef.current || currentTurnId;
+          const fallbackRes = await processVoiceTurn(user.id, liveCapturedText, history, activeTurnId);
+          if (fallbackRes.stale) {
+            setStatusMessage('Newest instruction received. Discarding older response.');
+            return;
+          }
           setTranscript(liveCapturedText);
           setLiveTranscript('');
           setAssistantText(fallbackRes.assistant_text);
           setCurrentAudioBase64(fallbackRes.audio_base64 || null);
           setHistory(fallbackRes.history);
           setStatusMessage('Elena responded!');
-          await playRimeAudio(fallbackRes.audio_base64, fallbackRes.assistant_text);
+          stopCurrentAudio();
+          const audio = await playRimeAudio(fallbackRes.audio_base64, fallbackRes.assistant_text, () => {
+            if (activeAudioRef.current && activeAudioRef.current.src === audio?.src) {
+              activeAudioRef.current = null;
+            }
+          });
+          activeAudioRef.current = audio;
           if (onUpdate) onUpdate();
           return;
         } catch {}
@@ -189,6 +226,11 @@ export default function VoiceModal({ isOpen, onClose, user, onUpdate, initialAss
     const text = textToSend || customText;
     if (!text.trim()) return;
 
+    stopCurrentAudio();
+    const nextTurnId = Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
+    turnIdRef.current = nextTurnId;
+    setCurrentTurnId(nextTurnId);
+
     setIsProcessing(true);
     setStatusMessage('Elena is thinking...');
     setTranscript(text);
@@ -196,12 +238,22 @@ export default function VoiceModal({ isOpen, onClose, user, onUpdate, initialAss
     setCustomText('');
 
     try {
-      const result = await processVoiceTurn(user.id, text, history);
+      const result = await processVoiceTurn(user.id, text, history, nextTurnId);
+      if (result.stale) {
+        setStatusMessage('Newest instruction received. Discarding older response.');
+        return;
+      }
+
       setAssistantText(result.assistant_text);
       setCurrentAudioBase64(result.audio_base64 || null);
       setHistory(result.history);
       setStatusMessage('Elena responded!');
-      await playRimeAudio(result.audio_base64, result.assistant_text);
+      const audio = await playRimeAudio(result.audio_base64, result.assistant_text, () => {
+        if (activeAudioRef.current && activeAudioRef.current.src === audio?.src) {
+          activeAudioRef.current = null;
+        }
+      });
+      activeAudioRef.current = audio;
       if (onUpdate) onUpdate();
     } catch (err) {
       console.error('Text voice turn error:', err);

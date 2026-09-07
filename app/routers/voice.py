@@ -32,6 +32,7 @@ class VoiceTurnRequest(BaseModel):
     speaker: Optional[str] = None
     speed: Optional[float] = None
     history: Optional[List[dict]] = None
+    turn_id: Optional[str] = None
 
 
 class VoiceTurnResponse(BaseModel):
@@ -41,7 +42,9 @@ class VoiceTurnResponse(BaseModel):
     audio_format: str
     extracted_health: dict
     history: List[dict]
-    conversation_id: int
+    conversation_id: Optional[int] = None
+    turn_id: str = ""
+    stale: bool = False
 
 
 class ProactiveCheckResponse(BaseModel):
@@ -110,7 +113,8 @@ async def process_turn(
             text_input=req.text_input,
             history=req.history,
             speaker=req.speaker,
-            speed=req.speed
+            speed=req.speed,
+            turn_id=req.turn_id
         )
         return result
     except ValueError as ve:
@@ -128,6 +132,7 @@ async def process_audio_turn(
     history_json: Optional[str] = Form(None),
     speaker: Optional[str] = Form(None),
     speed: Optional[float] = Form(None),
+    turn_id: Optional[str] = Form(None),
     db: Session = Depends(get_db)
 ):
     """
@@ -151,7 +156,8 @@ async def process_audio_turn(
             filename=filename,
             history=history,
             speaker=speaker,
-            speed=speed
+            speed=speed,
+            turn_id=turn_id
         )
         return result
     except ValueError as ve:

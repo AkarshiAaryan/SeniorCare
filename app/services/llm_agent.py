@@ -322,7 +322,9 @@ class LLMAgentService:
                             parts = data.get("candidates", [{}])[0].get("content", {}).get("parts", [])
                             content = "".join(p.get("text", "") for p in parts if isinstance(p, dict)).strip()
                             if content:
-                                return content.replace("*", "").replace("#", "").replace("`", "")
+                                clean = content.replace("*", "").replace("#", "").replace("`", "")
+                                if details and details.lower() in clean.lower():
+                                    return clean
                 except Exception as e:
                     logger.error(f"Gemini proactive generation error with {model_name}: {e}")
 
@@ -339,7 +341,9 @@ class LLMAgentService:
                 async with httpx.AsyncClient(timeout=8.0) as client:
                     res = await client.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=payload)
                     if res.status_code == 200:
-                        return res.json()["choices"][0]["message"]["content"].strip().replace("*", "")
+                        content = res.json()["choices"][0]["message"]["content"].strip().replace("*", "")
+                        if content and (not details or details.lower() in content.lower() or "Hello" in content):
+                            return content
             except Exception as e:
                 logger.error(f"Groq proactive generation error: {e}")
 
@@ -356,7 +360,9 @@ class LLMAgentService:
                 async with httpx.AsyncClient(timeout=8.0) as client:
                     res = await client.post("https://api.openai.com/v1/chat/completions", headers=headers, json=payload)
                     if res.status_code == 200:
-                        return res.json()["choices"][0]["message"]["content"].strip().replace("*", "")
+                        content = res.json()["choices"][0]["message"]["content"].strip().replace("*", "")
+                        if content and (not details or details.lower() in content.lower() or "Hello" in content):
+                            return content
             except Exception as e:
                 logger.error(f"OpenAI proactive generation error: {e}")
 

@@ -1,6 +1,7 @@
 import base64
 import json
 import logging
+import uuid
 from datetime import datetime
 from typing import Dict, Any, List, Optional
 from sqlalchemy.orm import Session
@@ -14,6 +15,48 @@ from app.services.health_extractor import health_extractor
 logger = logging.getLogger("VoiceOrchestrator")
 
 
+class TurnStateStore:
+    def __init__(self):
+        self.active_turns: Dict[int, str] = {}
+        self.turn_history: Dict[int, List[str]] = {}
+
+    def register_turn(self, user_id: int, turn_id: Optional[str]) -> str:
+        if not turn_id:
+            turn_id = str(uuid.uuid4())
+
+        history = self.turn_history.setdefault(user_id, [])
+        if turn_id not in history:
+            history.append(turn_id)
+
+        self.active_turns[user_id] = turn_id
+        return turn_id
+
+    def is_active_turn(self, user_id: int, turn_id: Optional[str]) -> bool:
+        if not turn_id:
+            return True
+
+        active_turn = self.active_turns.get(user_id)
+        history = self.turn_history.get(user_id, [])
+
+        if active_turn is None:
+            return True
+
+        if active_turn == turn_id:
+            return True
+
+        if turn_id in history:
+            return False
+
+        return True
+
+    def invalidate_user(self, user_id: int) -> None:
+        self.active_turns.pop(user_id, None)
+        self.turn_history.pop(user_id, None)
+
+
+turn_state_store = TurnStateStore()
+
+
 class VoiceOrchestrator:
     async def process_turn(
         self,
@@ -24,7 +67,8 @@ class VoiceOrchestrator:
         filename: str = "audio.wav",
         history: Optional[List[Dict[str, str]]] = None,
         speaker: Optional[str] = None,
-        speed: Optional[float] = None
+        speed: Optional[float] = None,
+        turn_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Processes a full conversational voice turn:
@@ -39,6 +83,21 @@ class VoiceOrchestrator:
         user = db.query(models.User).filter(models.User.id == user_id).first()
         if not user:
             raise ValueError(f"User with ID {user_id} not found.")
+
+        turn_id = turn_id or str(uuid.uuid4())
+        if not turn_state_store.is_active_turn(user_id, turn_id):
+            return {
+                "user_text": (text_input or "").strip(),
+                "assistant_text": "",
+                "audio_base64": "",
+                "audio_format": "audio/mpeg",
+                "extracted_health": {},
+                "history": history or [],
+                "conversation_id": None,
+                "turn_id": turn_id,
+                "stale": True,
+            }
+        turn_state_store.register_turn(user_id, turn_id)
 
         # 1. Speech-to-Text / Input Resolution
         user_text = (text_input or "").strip()
@@ -138,7 +197,9 @@ class VoiceOrchestrator:
             "audio_format": "audio/mpeg",
             "extracted_health": extracted,
             "history": conv_history,
-            "conversation_id": db_conv.id
+            "conversation_id": db_conv.id,
+            "turn_id": turn_id,
+            "stale": False,
         }
 
 

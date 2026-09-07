@@ -78,6 +78,33 @@ def test_voice_process_turn_nonexistent_user(client):
     assert res.status_code == 404
 
 
+def test_voice_process_turn_rejects_stale_turn(client):
+    u_res = client.post("/users", json={"name": "Alice Parker", "age": 79})
+    user_id = u_res.json()["id"]
+
+    old_turn = client.post("/voice/process-turn", json={
+        "user_id": user_id,
+        "text_input": "What medicines do I take tonight?",
+        "turn_id": "turn-old"
+    })
+    assert old_turn.status_code == 200
+
+    new_turn = client.post("/voice/process-turn", json={
+        "user_id": user_id,
+        "text_input": "Actually, only tell me about my blood pressure medicine.",
+        "turn_id": "turn-new"
+    })
+    assert new_turn.status_code == 200
+
+    stale_turn = client.post("/voice/process-turn", json={
+        "user_id": user_id,
+        "text_input": "Ignore that, I still want the old result.",
+        "turn_id": "turn-old"
+    })
+    assert stale_turn.status_code == 200
+    assert stale_turn.json().get("stale") is True
+
+
 def test_voice_websocket_endpoint(client):
     u_res = client.post("/users", json={"name": "Maggie Smith", "age": 89})
     user_id = u_res.json()["id"]

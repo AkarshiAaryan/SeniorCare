@@ -129,26 +129,31 @@ export async function getDailyReport(userId, dateStr = null) {
   return res.json();
 }
 
-export async function processVoiceTurn(userId, textInput, history = []) {
+export async function processVoiceTurn(userId, textInput, history = [], turnId = null) {
   const res = await fetch(`${API_BASE}/voice/process-turn`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       user_id: userId,
       text_input: textInput,
-      history: history
+      history: history,
+      turn_id: turnId
     })
   });
   if (!res.ok) throw new Error('Voice turn failed');
   return res.json();
 }
 
-export async function processAudioTurn(userId, audioBlob, history = [], textInput = '') {
+export async function processAudioTurn(userId, audioBlob, history = [], textInput = '', turnId = null) {
   const formData = new FormData();
   formData.append('user_id', userId);
   
   if (textInput && textInput.trim()) {
     formData.append('text_input', textInput.trim());
+  }
+
+  if (turnId) {
+    formData.append('turn_id', turnId);
   }
 
   if (audioBlob) {
@@ -188,13 +193,17 @@ export async function triggerProactivePrompt(userId, reasonType = '3_hour_checki
   return res.json();
 }
 
-export async function playRimeAudio(base64Audio, textFallback = '') {
+export async function playRimeAudio(base64Audio, textFallback = '', onStop = null) {
   // 1. If base64Audio from Rime TTS is present and valid audio stream
   if (base64Audio && base64Audio.length > 200 && !base64Audio.includes('MockRimeAudioStreamData')) {
     try {
       const audio = new Audio(`data:audio/mpeg;base64,${base64Audio}`);
+      if (onStop) {
+        audio.addEventListener('pause', onStop);
+        audio.addEventListener('ended', onStop);
+      }
       await audio.play();
-      return;
+      return audio;
     } catch (err) {
       console.warn('Rime audio element playback failed, falling back to browser SpeechSynthesis:', err);
     }
@@ -217,9 +226,14 @@ export async function playRimeAudio(base64Audio, textFallback = '') {
         utterance.voice = friendlyVoice;
       }
 
+      if (onStop) {
+        utterance.onend = onStop;
+      }
       window.speechSynthesis.speak(utterance);
     } catch (synthErr) {
       console.warn('Speech synthesis playback error:', synthErr);
     }
   }
+
+  return null;
 }

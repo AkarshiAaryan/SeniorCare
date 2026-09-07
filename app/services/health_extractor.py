@@ -42,6 +42,67 @@ class HealthExtractorService:
         self.openai_key = settings.OPENAI_API_KEY
         self.groq_key = settings.GROQ_API_KEY
 
+    def _fallback_result(self, transcript: str, known_medications: Optional[List[str]]=None) -> Dict[str, Any]:
+        text_lower = transcript.lower()
+
+        mood = "normal"
+        if any(w in text_lower for w in ["happy", "great", "cheerful", "good"]):
+            mood = "good"
+        elif any(w in text_lower for w in ["sad", "depressed", "lonely"]):
+            mood = "sad"
+        elif any(w in text_lower for w in ["tired", "exhausted", "sleepy", "drowsy"]):
+            mood = "tired"
+        elif any(w in text_lower for w in ["anxious", "worried", "nervous"]):
+            mood = "anxious"
+
+        sleep = "normal"
+        if any(w in text_lower for w in ["slept poorly", "poor sleep", "didn't sleep", "insomnia", "bad sleep", "trouble sleeping"]):
+            sleep = "poor"
+        elif any(w in text_lower for w in ["slept well", "good sleep", "slept great"]):
+            sleep = "good"
+
+        appetite = "normal"
+        if any(w in text_lower for w in ["no appetite", "not hungry", "haven't eaten", "poor appetite", "eating less"]):
+            appetite = "poor"
+        elif any(w in text_lower for w in ["good appetite", "ate well", "hungry"]):
+            appetite = "good"
+
+        pain = "none reported"
+        if "knee" in text_lower and ("pain" in text_lower or "hurt" in text_lower or "ache" in text_lower):
+            pain = "mild knee pain"
+        elif "headache" in text_lower:
+            pain = "headache"
+        elif "back" in text_lower and ("pain" in text_lower or "hurt" in text_lower or "ache" in text_lower):
+            pain = "back pain"
+        elif "pain" in text_lower or "hurts" in text_lower:
+            pain = "reported pain"
+
+        med_taken = None
+        import re
+        if re.search(r'\b(took|taken)\s+(my\s+)?(morning\s+|evening\s+|night\s+|daily\s+)?(medicine|pill|medicines|pills|medication|dose|tablet|tablets|it)\b', text_lower):
+            med_taken = True
+        elif re.search(r'\b(didn\'t|did not|forgot to|haven\'t|have not|missed)\s+(take|taken)?\s*(my\s+)?(morning\s+|evening\s+|night\s+)?(medicine|pill|medicines|pills|medication|dose)\b', text_lower):
+            med_taken = False
+
+        meds_list = []
+        if known_medications:
+            for km in known_medications:
+                if km.lower() in text_lower:
+                    meds_list.append({"name": km, "taken": med_taken if med_taken is not None else True, "scheduled_time": "08:00"})
+
+        urgent = any(w in text_lower for w in ["chest pain", "fell down", "can't breathe", "emergency", "fainted"])
+
+        return {
+            "mood": mood,
+            "sleep": sleep,
+            "appetite": appetite,
+            "pain": pain,
+            "medication_taken": med_taken,
+            "medications": meds_list,
+            "urgent_alert": urgent,
+            "summary_note": f"User reported {mood} mood, {sleep} sleep, and {pain}."
+        }
+
     async def extract_from_transcript(self, transcript: str, known_medications: Optional[List[str]] = None) -> Dict[str, Any]:
         """
         Extract structured health status and medication adherence from dialogue text.
@@ -88,7 +149,12 @@ class HealthExtractorService:
                             parts = data.get("candidates", [{}])[0].get("content", {}).get("parts", [])
                             content = "".join(p.get("text", "") for p in parts if isinstance(p, dict)).strip()
                             if content:
-                                return json.loads(content)
+                                try:
+                                    parsed = json.loads(content)
+                                    if isinstance(parsed, dict) and all(k in parsed for k in ["mood", "sleep", "appetite", "pain", "medication_taken"]):
+                                        return parsed
+                                except Exception:
+                                    pass
                         else:
                             logger.warning(f"Gemini extraction model {model_name} returned code {res.status_code}: {res.text}")
                 except Exception as e:
@@ -114,7 +180,12 @@ class HealthExtractorService:
                     res = await client.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=payload)
                     if res.status_code == 200:
                         content = res.json()["choices"][0]["message"]["content"]
-                        return json.loads(content)
+                        try:
+                            parsed = json.loads(content)
+                            if isinstance(parsed, dict) and all(k in parsed for k in ["mood", "sleep", "appetite", "pain", "medication_taken"]):
+                                return parsed
+                        except Exception:
+                            pass
             except Exception as e:
                 logger.error(f"Groq Extraction error: {e}")
 
@@ -138,75 +209,17 @@ class HealthExtractorService:
                     res = await client.post("https://api.openai.com/v1/chat/completions", headers=headers, json=payload)
                     if res.status_code == 200:
                         content = res.json()["choices"][0]["message"]["content"]
-                        return json.loads(content)
+                        try:
+                            parsed = json.loads(content)
+                            if isinstance(parsed, dict) and all(k in parsed for k in ["mood", "sleep", "appetite", "pain", "medication_taken"]):
+                                return parsed
+                        except Exception:
+                            pass
             except Exception as e:
                 logger.error(f"OpenAI Extraction error: {e}")
 
         # 4. Rule-based heuristic extraction fallback
-        text_lower = transcript.lower()
-        
-        # Mood
-        mood = "normal"
-        if any(w in text_lower for w in ["happy", "great", "cheerful", "good"]):
-            mood = "good"
-        elif any(w in text_lower for w in ["sad", "depressed", "lonely"]):
-            mood = "sad"
-        elif any(w in text_lower for w in ["tired", "exhausted", "sleepy", "drowsy"]):
-            mood = "tired"
-        elif any(w in text_lower for w in ["anxious", "worried", "nervous"]):
-            mood = "anxious"
-
-        # Sleep
-        sleep = "normal"
-        if any(w in text_lower for w in ["slept poorly", "poor sleep", "didn't sleep", "insomnia", "bad sleep", "trouble sleeping"]):
-            sleep = "poor"
-        elif any(w in text_lower for w in ["slept well", "good sleep", "slept great"]):
-            sleep = "good"
-
-        # Appetite
-        appetite = "normal"
-        if any(w in text_lower for w in ["no appetite", "not hungry", "haven't eaten", "poor appetite", "eating less"]):
-            appetite = "poor"
-        elif any(w in text_lower for w in ["good appetite", "ate well", "hungry"]):
-            appetite = "good"
-
-        # Pain
-        pain = "none reported"
-        if "knee" in text_lower and ("pain" in text_lower or "hurt" in text_lower or "ache" in text_lower):
-            pain = "mild knee pain"
-        elif "headache" in text_lower:
-            pain = "headache"
-        elif "back" in text_lower and ("pain" in text_lower or "hurt" in text_lower or "ache" in text_lower):
-            pain = "back pain"
-        elif "pain" in text_lower or "hurts" in text_lower:
-            pain = "reported pain"
-
-        # Medication adherence
-        med_taken = None
-        import re
-        if re.search(r'\b(took|taken)\s+(my\s+)?(morning\s+|evening\s+|night\s+|daily\s+)?(medicine|pill|medicines|pills|medication|dose|tablet|tablets|it)\b', text_lower):
-            med_taken = True
-        elif re.search(r'\b(didn\'t|did not|forgot to|haven\'t|have not|missed)\s+(take|taken)?\s*(my\s+)?(morning\s+|evening\s+|night\s+)?(medicine|pill|medicines|pills|medication|dose)\b', text_lower):
-            med_taken = False
-
-        meds_list = []
-        if known_medications:
-            for km in known_medications:
-                if km.lower() in text_lower:
-                    meds_list.append({"name": km, "taken": med_taken if med_taken is not None else True, "scheduled_time": "08:00"})
-
-        urgent = any(w in text_lower for w in ["chest pain", "fell down", "can't breathe", "emergency", "fainted"])
-
-        return {
-            "mood": mood,
-            "sleep": sleep,
-            "appetite": appetite,
-            "pain": pain,
-            "medication_taken": med_taken,
-            "medications": meds_list,
-            "urgent_alert": urgent,
-            "summary_note": f"User reported {mood} mood, {sleep} sleep, and {pain}."
-        }
+        return self._fallback_result(transcript, known_medications)
 
 
 health_extractor = HealthExtractorService()
