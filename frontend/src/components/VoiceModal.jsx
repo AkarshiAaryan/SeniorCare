@@ -15,7 +15,7 @@ export default function VoiceModal({ isOpen, onClose, user, onUpdate, initialAss
   const [currentTurnId, setCurrentTurnId] = useState(null);
   const [voiceState, setVoiceState] = useState('idle');
   const [isInterrupted, setIsInterrupted] = useState(false);
-  const [handsFree, setHandsFree] = useState(false);
+  const [handsFree, setHandsFree] = useState(true);
 
   const mediaRecorderRef = useRef(null);
   const audioChunksRef = useRef([]);
@@ -42,7 +42,13 @@ export default function VoiceModal({ isOpen, onClose, user, onUpdate, initialAss
   const stopStreamedAudio = () => {
     const stream = streamedAudioRef.current;
     if (!stream) return;
-    try { stream.audio.pause(); } catch {}
+    try {
+      if (stream.audio) {
+        stream.audio.pause();
+        stream.audio.currentTime = 0;
+        stream.audio.src = '';
+      }
+    } catch {}
     try { URL.revokeObjectURL(stream.url); } catch {}
     streamedAudioRef.current = null;
   };
@@ -56,10 +62,18 @@ export default function VoiceModal({ isOpen, onClose, user, onUpdate, initialAss
       }
     }
     if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
-      try { window.speechSynthesis.cancel(); } catch {}
+      try {
+        window.speechSynthesis.cancel();
+        window.speechSynthesis.pause();
+        window.speechSynthesis.cancel();
+      } catch {}
     }
     if (activeAudioRef.current) {
-      try { activeAudioRef.current.pause(); } catch {}
+      try {
+        activeAudioRef.current.pause();
+        activeAudioRef.current.currentTime = 0;
+        activeAudioRef.current.src = '';
+      } catch {}
       activeAudioRef.current = null;
     }
     stopStreamedAudio();
@@ -448,6 +462,10 @@ export default function VoiceModal({ isOpen, onClose, user, onUpdate, initialAss
               }
             }
             const currentFull = (completeText + interimText).trim();
+            if (currentFull && (voiceState === 'speaking' || activeAudioRef.current || streamedAudioRef.current)) {
+              stopCurrentAudio();
+              setVoiceState('listening');
+            }
             finalTranscriptRef.current = currentFull;
             setLiveTranscript(currentFull);
             setTranscript(currentFull);
