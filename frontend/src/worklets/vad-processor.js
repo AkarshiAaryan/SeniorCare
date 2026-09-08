@@ -5,7 +5,8 @@ class VADProcessor extends AudioWorkletProcessor {
     this._speechFrames = 0;
     this._silenceFrames = 0;
     this._speechConfirmFrames = (options && options.processorOptions && options.processorOptions.speechConfirmFrames) || 5; // ~125ms at 128 frame size
-    this._silenceConfirmFrames = (options && options.processorOptions && options.processorOptions.silenceConfirmFrames) || 15; // ~375ms
+    // 140 frames @ 128 samples per frame (48kHz) = ~373ms silence window before speech_end
+    this._silenceConfirmFrames = (options && options.processorOptions && options.processorOptions.silenceConfirmFrames) || 140; 
     this._frameCount = 0;
   }
 

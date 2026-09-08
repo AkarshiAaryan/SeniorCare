@@ -48,6 +48,13 @@ export default function VoiceModal({ isOpen, onClose, user, onUpdate, initialAss
   };
 
   const stopCurrentAudio = () => {
+    const activeTurnId = turnIdRef.current;
+    if (activeTurnId) {
+      sendWsJson({ event: 'cancel_turn', turn_id: activeTurnId });
+      if (user && user.id) {
+        fetch(`/voice/cancel/${user.id}`, { method: 'POST' }).catch(() => {});
+      }
+    }
     if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
       try { window.speechSynthesis.cancel(); } catch {}
     }

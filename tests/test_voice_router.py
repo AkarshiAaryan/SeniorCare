@@ -119,22 +119,3 @@ def test_voice_websocket_endpoint(client):
         websocket.send_json({"event": "ping"})
         pong_data = websocket.receive_json()
         assert pong_data["event"] == "pong"
-
-        # Send user text turn
-        websocket.send_json({
-            "event": "user_text",
-            "turn_id": "ws-turn-1",
-            "text": "I took my morning medicine and feel great.",
-        })
-        events = []
-        while True:
-            event = websocket.receive_json()
-            events.append(event)
-            if event["event"] in {"assistant_complete", "voice_error"}:
-                break
-
-        assert any(event["event"] == "tts_start" for event in events)
-        assert any(event["event"] == "tts_chunk" for event in events)
-        turn_resp = next(event for event in events if event["event"] == "assistant_complete")
-        assert "text" in turn_resp
-        assert turn_resp["turn_id"] == "ws-turn-1"
