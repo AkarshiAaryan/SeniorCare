@@ -41,23 +41,19 @@ class TurnStateStore:
     def is_active_turn(self, user_id: int, turn_id: Optional[str]) -> bool:
         if not turn_id:
             return True
-        active_turn = self.active_turns.get(user_id)
         cancelled = self.cancelled_turns.get(user_id, [])
-
-        # If no active turn recorded, be permissive
-        if active_turn is None:
-            return True
-
-        # If the provided turn matches the current active turn, it's active
-        if active_turn == turn_id:
-            return True
-
-        # If the turn is known to be cancelled, it's not active
         if turn_id in cancelled:
             return False
 
-        # Any other turn id that is not the active one should be treated as stale
-        return False
+        active_turn = self.active_turns.get(user_id)
+        if active_turn == turn_id:
+            return True
+
+        history = self.turn_history.get(user_id, [])
+        if turn_id in history:
+            return False
+
+        return True
 
     def invalidate_user(self, user_id: int) -> None:
         self.active_turns.pop(user_id, None)
@@ -78,6 +74,9 @@ turn_state_store = TurnStateStore()
 
 
 class VoiceOrchestrator:
+    def __init__(self):
+        self.turn_state_store = turn_state_store
+
     async def process_turn(
         self,
         db: Session,

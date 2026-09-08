@@ -344,6 +344,7 @@ export default function VoiceModal({ isOpen, onClose, user, onUpdate, initialAss
               setVoiceState('interrupted');
               setStatusMessage('Previous response cancelled by new input');
             } else if (msg.event === 'assistant_response') {
+              if (msg.turn_id && msg.turn_id !== turnIdRef.current) return;
               const text = msg.text || '';
               const audio_b64 = msg.audio_base64 || null;
               setAssistantText(text);
@@ -537,6 +538,8 @@ export default function VoiceModal({ isOpen, onClose, user, onUpdate, initialAss
       const activeTurnId = turnIdRef.current || currentTurnId;
       const result = await processAudioTurn(user.id, audioBlob, history, liveCapturedText, activeTurnId);
 
+      if (turnIdRef.current && turnIdRef.current !== activeTurnId) return;
+
       if (result.stale) {
         setIsInterrupted(true);
         setVoiceState('interrupted');
@@ -616,6 +619,8 @@ export default function VoiceModal({ isOpen, onClose, user, onUpdate, initialAss
 
     try {
       const result = await processVoiceTurn(user.id, text, history, nextTurnId);
+      if (turnIdRef.current && turnIdRef.current !== nextTurnId) return;
+
       if (result.stale) {
         setIsInterrupted(true);
         setVoiceState('interrupted');
