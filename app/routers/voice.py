@@ -1,3 +1,4 @@
+import asyncio
 import json
 import base64
 import logging
@@ -263,13 +264,22 @@ async def trigger_proactive_prompt(req: ProactiveTriggerRequest, db: Session = D
     )
 
 
+
+@router.post("/cancel/{user_id}")
+def cancel_active_turn(user_id: int):
+    """Explicit HTTP endpoint to cancel the currently active turn for a user."""
+    prev = voice_orchestrator.turn_state_store.cancel_active_turn(user_id)
+    if prev:
+        return {"cancelled_turn": prev}
+    return {"cancelled_turn": None}
+
+
 @router.websocket("/ws/{user_id}")
 async def voice_websocket_endpoint(websocket: WebSocket, user_id: int):
     """
     Real-time bidirectional WebSocket for streaming voice interactions with elderly users.
     """
     await websocket.accept()
-    db = SessionLocal()
     history = []
     logger.info(f"WebSocket voice session opened for user {user_id}")
 
@@ -286,44 +296,124 @@ async def voice_websocket_endpoint(websocket: WebSocket, user_id: int):
         })
         history.append({"role": "assistant", "content": greeting_text})
 
+        # Keep receiving microphone events while STT/LLM/TTS work runs in a
+        # separate task. A new speech_start cancels and supersedes that task.
+        current_turn_id = None
+        audio_chunks = []
+        active_task: Optional[asyncio.Task] = None
+        send_lock = asyncio.Lock()
+
+        async def send(payload: dict) -> None:
+            async with send_lock:
+                await websocket.send_json(payload)
+
+        async def run_turn(turn_id: str, audio_bytes: Optional[bytes] = None, text_input: Optional[str] = None) -> None:
+            nonlocal history
+            db = SessionLocal()
+            stream_started = False
+
+            async def send_audio_chunk(chunk: bytes, sequence: int) -> None:
+                nonlocal stream_started
+                if not stream_started:
+                    stream_started = True
+                    await send({"event": "tts_start", "turn_id": turn_id, "audio_format": "audio/mpeg"})
+                await send({
+                    "event": "tts_chunk",
+                    "turn_id": turn_id,
+                    "sequence": sequence,
+                    "audio": base64.b64encode(chunk).decode("utf-8"),
+                })
+
+            try:
+                result = await voice_orchestrator.process_turn(
+                    db=db,
+                    user_id=user_id,
+                    audio_bytes=audio_bytes,
+                    text_input=text_input,
+                    history=list(history),
+                    turn_id=turn_id,
+                    audio_chunk_handler=send_audio_chunk,
+                )
+                if result.get("stale"):
+                    await send({"event": "stale_turn", "turn_id": turn_id})
+                    return
+                history = result["history"]
+                if stream_started:
+                    await send({"event": "tts_end", "turn_id": turn_id})
+                await send({
+                    "event": "assistant_complete",
+                    "turn_id": turn_id,
+                    "user_text": result["user_text"],
+                    "text": result["assistant_text"],
+                    "extracted_health": result["extracted_health"],
+                    "history": result["history"],
+                })
+            except asyncio.CancelledError:
+                # The newer speech_start has already invalidated this turn.
+                raise
+            except Exception as exc:
+                logger.error("WebSocket voice turn failed: %s", exc)
+                await send({"event": "voice_error", "turn_id": turn_id, "message": "Voice turn failed"})
+            finally:
+                db.close()
+
         while True:
             data = await websocket.receive_json()
             event_type = data.get("event")
 
-            if event_type == "user_text":
-                user_msg = data.get("text", "")
-                result = await voice_orchestrator.process_turn(
-                    db=db,
-                    user_id=user_id,
-                    text_input=user_msg,
-                    history=history
-                )
-                history = result["history"]
-                await websocket.send_json({
-                    "event": "assistant_response",
-                    "user_text": result["user_text"],
-                    "text": result["assistant_text"],
-                    "audio_base64": result["audio_base64"],
-                    "extracted_health": result["extracted_health"]
-                })
+            if event_type == "speech_start":
+                # New speech turn is beginning; register new turn_id and cancel previous
+                requested = data.get("turn_id")
+                prev_active = voice_orchestrator.turn_state_store.active_turns.get(user_id)
+                new_turn = voice_orchestrator.turn_state_store.register_turn(user_id, requested)
+                current_turn_id = new_turn
+                audio_chunks = []
+                if active_task and not active_task.done():
+                    active_task.cancel()
+                # If a previous active turn existed and differs, notify client to stop playback
+                if prev_active and prev_active != new_turn:
+                    await websocket.send_json({"event": "turn_invalidated", "turn_id": prev_active})
 
-            elif event_type == "user_audio":
-                audio_b64_in = data.get("audio_base64", "")
-                audio_bytes_in = base64.b64decode(audio_b64_in)
-                result = await voice_orchestrator.process_turn(
-                    db=db,
-                    user_id=user_id,
-                    audio_bytes=audio_bytes_in,
-                    history=history
-                )
-                history = result["history"]
-                await websocket.send_json({
-                    "event": "assistant_response",
-                    "user_text": result["user_text"],
-                    "text": result["assistant_text"],
-                    "audio_base64": result["audio_base64"],
-                    "extracted_health": result["extracted_health"]
-                })
+            elif event_type == "audio_chunk":
+                # receive base64 chunk and append
+                chunk_b64 = data.get("audio", "")
+                if chunk_b64 and data.get("turn_id") == current_turn_id:
+                    try:
+                        chunk_bytes = base64.b64decode(chunk_b64)
+                        audio_chunks.append(chunk_bytes)
+                    except Exception:
+                        logger.warning("Invalid audio chunk received")
+
+            elif event_type == "speech_end":
+                # finalize audio and process turn if still active
+                if not current_turn_id:
+                    await websocket.send_json({"event": "error", "message": "no active turn"})
+                    continue
+                if data.get("turn_id") != current_turn_id:
+                    continue
+                audio_bytes_in = b"".join(audio_chunks)
+                active_task = asyncio.create_task(run_turn(current_turn_id, audio_bytes=audio_bytes_in))
+                # Clear current turn
+                current_turn_id = None
+                audio_chunks = []
+
+            elif event_type == "cancel_turn":
+                # Explicit cancel requested (e.g., client barge-in)
+                prev = voice_orchestrator.turn_state_store.cancel_active_turn(user_id)
+                if prev:
+                    if active_task and not active_task.done():
+                        active_task.cancel()
+                    await websocket.send_json({"event": "turn_invalidated", "turn_id": prev})
+
+            elif event_type == "user_text":
+                requested = data.get("turn_id")
+                prev_active = voice_orchestrator.turn_state_store.active_turns.get(user_id)
+                new_turn = voice_orchestrator.turn_state_store.register_turn(user_id, requested)
+                if active_task and not active_task.done():
+                    active_task.cancel()
+                if prev_active and prev_active != new_turn:
+                    await send({"event": "turn_invalidated", "turn_id": prev_active})
+                active_task = asyncio.create_task(run_turn(new_turn, text_input=data.get("text", "")))
 
             elif event_type == "ping":
                 await websocket.send_json({"event": "pong"})
@@ -333,4 +423,5 @@ async def voice_websocket_endpoint(websocket: WebSocket, user_id: int):
     except Exception as e:
         logger.error(f"WebSocket error for user {user_id}: {e}")
     finally:
-        db.close()
+        if 'active_task' in locals() and active_task and not active_task.done():
+            active_task.cancel()

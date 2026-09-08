@@ -25,6 +25,29 @@ async def test_health_extraction_missed_medication():
 
 
 @pytest.mark.asyncio
+async def test_health_extraction_local_pattern_pipeline_simple_symptoms():
+    extractor = HealthExtractorService()
+    transcript = "User: I have a sharp back pain and I did not sleep well last night."
+
+    extracted = extractor._local_pattern_extract(transcript)
+
+    assert extracted["pain"] == "back pain"
+    assert extracted["sleep"] == "poor"
+    assert extracted["match_confidence"] >= 0.8
+
+
+@pytest.mark.asyncio
+async def test_health_extraction_local_pattern_pipeline_for_missed_medication():
+    extractor = HealthExtractorService()
+    transcript = "User: I forgot to take my medication this morning."
+
+    extracted = extractor._local_pattern_extract(transcript)
+
+    assert extracted["medication_taken"] is False
+    assert extracted["match_confidence"] >= 0.8
+
+
+@pytest.mark.asyncio
 async def test_health_extraction_empty_transcript():
     extractor = HealthExtractorService()
     extracted = await extractor.extract_from_transcript("")

@@ -42,6 +42,105 @@ class HealthExtractorService:
         self.openai_key = settings.OPENAI_API_KEY
         self.groq_key = settings.GROQ_API_KEY
 
+    def _local_pattern_extract(self, transcript: str, known_medications: Optional[List[str]] = None) -> Dict[str, Any]:
+        text_lower = transcript.lower()
+        result = {
+            "mood": "normal",
+            "sleep": "normal",
+            "appetite": "normal",
+            "pain": "none reported",
+            "medication_taken": None,
+            "medications": [],
+            "urgent_alert": False,
+            "summary_note": "No structured symptom details detected.",
+            "match_confidence": 0.0,
+        }
+
+        if not text_lower.strip():
+            return result
+
+        import re
+
+        pain_matches = []
+        if re.search(r'\b(knee|knees)\b.*\b(pain|hurt|hurts|ache|aching)\b|\b(pain|hurt|hurts|ache|aching)\b.*\b(knee|knees)\b', text_lower):
+            pain_matches.append(("mild knee pain", 0.95))
+        if re.search(r'\b(back|lower back)\b.*\b(pain|hurt|hurts|ache|aching)\b|\b(pain|hurt|hurts|ache|aching)\b.*\b(back|lower back)\b', text_lower):
+            pain_matches.append(("back pain", 0.95))
+        if 'headache' in text_lower or 'head ache' in text_lower:
+            pain_matches.append(("headache", 0.9))
+        if re.search(r'\b(chest)\b.*\b(pain|hurt|hurts|ache|aching)\b|\b(pain|hurt|hurts|ache|aching)\b.*\b(chest)\b', text_lower):
+            pain_matches.append(("chest pain", 0.99))
+        if pain_matches:
+            result["pain"] = max(pain_matches, key=lambda item: item[1])[0]
+            result["match_confidence"] = max(result["match_confidence"], max(score for _, score in pain_matches))
+
+        sleep_matches = []
+        if any(phrase in text_lower for phrase in ["didn't sleep", "did not sleep", "couldn't sleep", "could not sleep", "trouble sleeping", "bad sleep", "poor sleep", "insomnia", "slept poorly"]):
+            sleep_matches.append(("poor", 0.95))
+        if any(phrase in text_lower for phrase in ["slept well", "good sleep", "slept great", "rested well"]):
+            sleep_matches.append(("good", 0.9))
+        if sleep_matches:
+            result["sleep"] = max(sleep_matches, key=lambda item: item[1])[0]
+            result["match_confidence"] = max(result["match_confidence"], max(score for _, score in sleep_matches))
+
+        mood_matches = []
+        if any(phrase in text_lower for phrase in ["happy", "good", "great", "feeling well", "doing well", "okay"]):
+            mood_matches.append(("good", 0.75))
+        if any(phrase in text_lower for phrase in ["sad", "lonely", "down", "depressed", "upset", "crying"]):
+            mood_matches.append(("sad", 0.9))
+        if any(phrase in text_lower for phrase in ["tired", "exhausted", "sleepy", "drowsy"]):
+            mood_matches.append(("tired", 0.85))
+        if any(phrase in text_lower for phrase in ["anxious", "worried", "nervous"]):
+            mood_matches.append(("anxious", 0.9))
+        if mood_matches:
+            result["mood"] = max(mood_matches, key=lambda item: item[1])[0]
+            result["match_confidence"] = max(result["match_confidence"], max(score for _, score in mood_matches))
+
+        appetite_matches = []
+        if any(phrase in text_lower for phrase in ["no appetite", "not hungry", "haven't eaten", "have not eaten", "poor appetite", "eating less"]):
+            appetite_matches.append(("poor", 0.9))
+        if any(phrase in text_lower for phrase in ["good appetite", "ate well", "hungry", "eating well"]):
+            appetite_matches.append(("good", 0.8))
+        if appetite_matches:
+            result["appetite"] = max(appetite_matches, key=lambda item: item[1])[0]
+            result["match_confidence"] = max(result["match_confidence"], max(score for _, score in appetite_matches))
+
+        med_taken = None
+        med_taken_patterns = [
+            (True, r'\b(took|taken)\s+(my\s+)?(morning\s+|evening\s+|night\s+|daily\s+)?(medicine|pill|medicines|pills|medication|dose|tablet|tablets|it)\b'),
+            (False, r'\b(didn\'t|did not|forgot to|haven\'t|have not|missed)\s+(take|taken)?\s*(my\s+)?(morning\s+|evening\s+|night\s+)?(medicine|pill|medicines|pills|medication|dose|tablet|tablets)\b')
+        ]
+        for taken, pattern in med_taken_patterns:
+            if re.search(pattern, text_lower):
+                med_taken = taken
+                result["match_confidence"] = max(result["match_confidence"], 0.95 if taken else 0.9)
+                break
+
+        result["medication_taken"] = med_taken
+
+        if known_medications:
+            for med_name in known_medications:
+                lower_name = med_name.lower()
+                if lower_name in text_lower:
+                    result["medications"].append({
+                        "name": med_name,
+                        "taken": med_taken if med_taken is not None else True,
+                        "scheduled_time": "08:00"
+                    })
+
+        if result["pain"] != "none reported" or result["sleep"] == "poor" or result["medication_taken"] is False:
+            result["summary_note"] = (
+                f"User reported {result['mood']} mood, {result['sleep']} sleep, and {result['pain']}."
+            )
+
+        if any(w in text_lower for w in ["chest pain", "fainted", "can't breathe", "cannot breathe", "emergency", "fell down"]):
+            result["urgent_alert"] = True
+            result["match_confidence"] = max(result["match_confidence"], 0.99)
+
+        if result["match_confidence"] == 0.0:
+            result["match_confidence"] = 0.1
+        return result
+
     def _fallback_result(self, transcript: str, known_medications: Optional[List[str]]=None) -> Dict[str, Any]:
         text_lower = transcript.lower()
 
@@ -119,11 +218,15 @@ class HealthExtractorService:
                 "summary_note": "No conversation data."
             }
 
+        local_result = self._local_pattern_extract(transcript, known_medications)
+        if local_result["match_confidence"] >= 0.8:
+            return local_result
+
         prompt_user = f"Known medications: {known_medications or []}\n\nTranscript:\n{transcript}"
 
         # 1. Try Gemini API JSON extraction (Native Google REST Endpoint)
         if is_valid_key(self.gemini_key):
-            candidate_models = [self.gemini_model, "gemini-2.5-flash-lite", "gemini-flash-latest", "gemini-2.5-flash"]
+            candidate_models = [self.gemini_model, "gemini-3.6-flash", "gemini-2.5-flash-lite", "gemini-flash-latest"]
             seen_models = set()
             models_to_try = [m for m in candidate_models if m and not (m in seen_models or seen_models.add(m))]
             payload = {

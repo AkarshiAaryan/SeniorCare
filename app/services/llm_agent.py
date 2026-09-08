@@ -156,7 +156,7 @@ class LLMAgentService:
                 }
             }
 
-            candidate_models = [self.gemini_model, "gemini-2.5-flash-lite", "gemini-flash-latest", "gemini-2.5-flash"]
+            candidate_models = [self.gemini_model, "gemini-3.6-flash", "gemini-2.5-flash-lite", "gemini-flash-latest"]
             seen_models = set()
             models_to_try = [m for m in candidate_models if m and not (m in seen_models or seen_models.add(m))]
 
@@ -301,7 +301,7 @@ class LLMAgentService:
 
         # 1. Try Gemini
         if is_valid_key(self.gemini_key):
-            candidate_models = [self.gemini_model, "gemini-2.5-flash-lite", "gemini-flash-latest", "gemini-2.5-flash"]
+            candidate_models = [self.gemini_model, "gemini-3.6-flash", "gemini-2.5-flash-lite", "gemini-flash-latest"]
             seen_models = set()
             models_to_try = [m for m in candidate_models if m and not (m in seen_models or seen_models.add(m))]
             payload = {

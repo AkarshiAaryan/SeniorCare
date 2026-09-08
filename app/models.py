@@ -10,6 +10,9 @@ class Caregiver(Base):
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, nullable=False)
     contact = Column(String, nullable=False)
+    username = Column(String, unique=True, nullable=True)
+    password_hash = Column(String, nullable=True)
+    role = Column(String, default="caregiver")
 
     users = relationship("User", back_populates="caregiver")
 

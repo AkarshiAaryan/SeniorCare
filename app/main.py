@@ -1,10 +1,12 @@
+import os
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.database import engine, Base
-from app.routers import users, medications, health, medication_logs, reports, events, voice, caregiver
+from app.routers import users, medications, health, medication_logs, reports, events, voice, caregiver, auth
 from app.scheduler import start_scheduler, stop_scheduler
+from app.config import settings
 
 # Create database tables
 Base.metadata.create_all(bind=engine)
@@ -26,13 +28,22 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# CORS middleware configuration
+# CORS middleware configuration: restrict to configured trusted origins
+trusted = os.getenv('TRUSTED_ORIGINS')
+if trusted:
+    origins = [o.strip() for o in trusted.split(',') if o.strip()]
+else:
+    # sensible defaults for local dev; override via TRUSTED_ORIGINS env var
+    origins = ["http://127.0.0.1:5173", "http://localhost:5173", "http://127.0.0.1:3000", "http://localhost:3000"]
+
+allow_creds = os.getenv('ALLOW_CREDENTIALS', 'false').lower() in ('1', 'true', 'yes')
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=origins,
+    allow_credentials=allow_creds,
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "Accept"],
 )
 
 # Include API Routers
@@ -44,6 +55,7 @@ app.include_router(reports.router)
 app.include_router(events.router)
 app.include_router(voice.router)
 app.include_router(caregiver.router)
+app.include_router(auth.router)
 
 
 @app.get("/")

@@ -3,7 +3,7 @@ import json
 import logging
 import uuid
 from datetime import datetime
-from typing import Dict, Any, List, Optional
+from typing import Awaitable, Callable, Dict, Any, List, Optional
 from sqlalchemy.orm import Session
 
 from app import models
@@ -19,6 +19,7 @@ class TurnStateStore:
     def __init__(self):
         self.active_turns: Dict[int, str] = {}
         self.turn_history: Dict[int, List[str]] = {}
+        self.cancelled_turns: Dict[int, List[str]] = {}
 
     def register_turn(self, user_id: int, turn_id: Optional[str]) -> str:
         if not turn_id:
@@ -27,6 +28,12 @@ class TurnStateStore:
         history = self.turn_history.setdefault(user_id, [])
         if turn_id not in history:
             history.append(turn_id)
+        # mark any previous active turn as cancelled
+        prev = self.active_turns.get(user_id)
+        if prev and prev != turn_id:
+            cancelled = self.cancelled_turns.setdefault(user_id, [])
+            if prev not in cancelled:
+                cancelled.append(prev)
 
         self.active_turns[user_id] = turn_id
         return turn_id
@@ -34,24 +41,37 @@ class TurnStateStore:
     def is_active_turn(self, user_id: int, turn_id: Optional[str]) -> bool:
         if not turn_id:
             return True
-
         active_turn = self.active_turns.get(user_id)
-        history = self.turn_history.get(user_id, [])
+        cancelled = self.cancelled_turns.get(user_id, [])
 
+        # If no active turn recorded, be permissive
         if active_turn is None:
             return True
 
+        # If the provided turn matches the current active turn, it's active
         if active_turn == turn_id:
             return True
 
-        if turn_id in history:
+        # If the turn is known to be cancelled, it's not active
+        if turn_id in cancelled:
             return False
 
-        return True
+        # Any other turn id that is not the active one should be treated as stale
+        return False
 
     def invalidate_user(self, user_id: int) -> None:
         self.active_turns.pop(user_id, None)
         self.turn_history.pop(user_id, None)
+        self.cancelled_turns.pop(user_id, None)
+
+    def cancel_active_turn(self, user_id: int) -> Optional[str]:
+        """Mark the current active turn as cancelled and return the cancelled turn id."""
+        prev = self.active_turns.pop(user_id, None)
+        if prev:
+            cancelled = self.cancelled_turns.setdefault(user_id, [])
+            if prev not in cancelled:
+                cancelled.append(prev)
+        return prev
 
 
 turn_state_store = TurnStateStore()
@@ -68,7 +88,8 @@ class VoiceOrchestrator:
         history: Optional[List[Dict[str, str]]] = None,
         speaker: Optional[str] = None,
         speed: Optional[float] = None,
-        turn_id: Optional[str] = None
+        turn_id: Optional[str] = None,
+        audio_chunk_handler: Optional[Callable[[bytes, int], Awaitable[None]]] = None,
     ) -> Dict[str, Any]:
         """
         Processes a full conversational voice turn:
@@ -85,6 +106,7 @@ class VoiceOrchestrator:
             raise ValueError(f"User with ID {user_id} not found.")
 
         turn_id = turn_id or str(uuid.uuid4())
+        # if the turn is already known to be cancelled/stale, return early
         if not turn_state_store.is_active_turn(user_id, turn_id):
             return {
                 "user_text": (text_input or "").strip(),
@@ -103,6 +125,20 @@ class VoiceOrchestrator:
         user_text = (text_input or "").strip()
         if not user_text and audio_bytes and len(audio_bytes) > 0:
             user_text = await stt_service.transcribe(audio_bytes, filename=filename)
+
+        # Re-check active state after STT
+        if not turn_state_store.is_active_turn(user_id, turn_id):
+            return {
+                "user_text": (user_text or "").strip(),
+                "assistant_text": "",
+                "audio_base64": "",
+                "audio_format": "audio/mpeg",
+                "extracted_health": {},
+                "history": history or [],
+                "conversation_id": None,
+                "turn_id": turn_id,
+                "stale": True,
+            }
 
         if not user_text or not user_text.strip():
             user_text = "Hello Elena, I am here."
@@ -129,15 +165,59 @@ class VoiceOrchestrator:
             time_of_day=time_of_day
         )
 
+        # Re-check active state after LLM/tool work
+        if not turn_state_store.is_active_turn(user_id, turn_id):
+            return {
+                "user_text": user_text,
+                "assistant_text": "",
+                "audio_base64": "",
+                "audio_format": "audio/mpeg",
+                "extracted_health": {},
+                "history": conv_history,
+                "conversation_id": None,
+                "turn_id": turn_id,
+                "stale": True,
+            }
+
         conv_history.append({"role": "assistant", "content": ai_response_text})
 
-        # 4. Rime TTS Speech Synthesis
-        audio_bytes_out = await rime_service.synthesize(
-            text=ai_response_text,
-            speaker=speaker,
-            speed=speed,
-            audio_format="audio/mpeg"
-        )
+        # 4. Rime TTS Speech Synthesis. WebSocket callers can receive chunks as
+        # they arrive; HTTP callers retain the original full-buffer response.
+        if audio_chunk_handler:
+            chunks: List[bytes] = []
+            chunk_index = 0
+            async for chunk in rime_service.stream_synthesize(
+                text=ai_response_text,
+                speaker=speaker,
+                speed=speed,
+                audio_format="audio/mpeg",
+            ):
+                if not turn_state_store.is_active_turn(user_id, turn_id):
+                    return self._stale_result(user_text, conv_history, turn_id)
+                chunks.append(chunk)
+                await audio_chunk_handler(chunk, chunk_index)
+                chunk_index += 1
+            audio_bytes_out = b"".join(chunks)
+        else:
+            audio_bytes_out = await rime_service.synthesize(
+                text=ai_response_text,
+                speaker=speaker,
+                speed=speed,
+                audio_format="audio/mpeg"
+            )
+        # Re-check active state after TTS synthesis (so we don't prepare audio for cancelled turns)
+        if not turn_state_store.is_active_turn(user_id, turn_id):
+            return {
+                "user_text": user_text,
+                "assistant_text": "",
+                "audio_base64": "",
+                "audio_format": "audio/mpeg",
+                "extracted_health": {},
+                "history": conv_history,
+                "conversation_id": None,
+                "turn_id": turn_id,
+                "stale": True,
+            }
         audio_base64 = base64.b64encode(audio_bytes_out).decode("utf-8")
 
         # 5. Extract structured clinical data
@@ -145,6 +225,20 @@ class VoiceOrchestrator:
         extracted = await health_extractor.extract_from_transcript(full_transcript, known_medications=med_names)
 
         # 6. Database Persistence
+        # Final active-turn check before any DB side-effects
+        if not turn_state_store.is_active_turn(user_id, turn_id):
+            return {
+                "user_text": user_text,
+                "assistant_text": "",
+                "audio_base64": "",
+                "audio_format": "audio/mpeg",
+                "extracted_health": {},
+                "history": conv_history,
+                "conversation_id": None,
+                "turn_id": turn_id,
+                "stale": True,
+            }
+
         # A. Save Conversation
         db_conv = models.Conversation(
             user_id=user.id,
@@ -200,6 +294,21 @@ class VoiceOrchestrator:
             "conversation_id": db_conv.id,
             "turn_id": turn_id,
             "stale": False,
+        }
+
+    @staticmethod
+    def _stale_result(user_text: str, history: List[Dict[str, str]], turn_id: str) -> Dict[str, Any]:
+        """Return one consistent stale response without emitting side effects."""
+        return {
+            "user_text": user_text,
+            "assistant_text": "",
+            "audio_base64": "",
+            "audio_format": "audio/mpeg",
+            "extracted_health": {},
+            "history": history,
+            "conversation_id": None,
+            "turn_id": turn_id,
+            "stale": True,
         }
 
 

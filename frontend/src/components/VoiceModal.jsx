@@ -13,13 +13,39 @@ export default function VoiceModal({ isOpen, onClose, user, onUpdate, initialAss
   const [customText, setCustomText] = useState('');
   const [statusMessage, setStatusMessage] = useState('Tap the microphone to speak');
   const [currentTurnId, setCurrentTurnId] = useState(null);
+  const [voiceState, setVoiceState] = useState('idle');
+  const [isInterrupted, setIsInterrupted] = useState(false);
+  const [handsFree, setHandsFree] = useState(false);
 
   const mediaRecorderRef = useRef(null);
   const audioChunksRef = useRef([]);
+  const wsRef = useRef(null);
   const recognitionRef = useRef(null);
   const finalTranscriptRef = useRef('');
   const activeAudioRef = useRef(null);
   const turnIdRef = useRef(null);
+  const vadStreamRef = useRef(null);
+  const audioContextRef = useRef(null);
+  const analyserRef = useRef(null);
+  const vadRafRef = useRef(null);
+  const vadSilenceStartRef = useRef(null);
+  const audioSendQueueRef = useRef(Promise.resolve());
+  const streamedAudioRef = useRef(null);
+
+  const base64ToBytes = (value) => {
+    const binary = atob(value);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+    return bytes;
+  };
+
+  const stopStreamedAudio = () => {
+    const stream = streamedAudioRef.current;
+    if (!stream) return;
+    try { stream.audio.pause(); } catch {}
+    try { URL.revokeObjectURL(stream.url); } catch {}
+    streamedAudioRef.current = null;
+  };
 
   const stopCurrentAudio = () => {
     if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
@@ -28,6 +54,250 @@ export default function VoiceModal({ isOpen, onClose, user, onUpdate, initialAss
     if (activeAudioRef.current) {
       try { activeAudioRef.current.pause(); } catch {}
       activeAudioRef.current = null;
+    }
+    stopStreamedAudio();
+    setIsInterrupted(true);
+  };
+
+  const sendWsJson = (obj) => {
+    try {
+      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify(obj));
+        return true;
+      }
+    } catch (e) {
+      console.warn('WS send failed', e);
+    }
+    return false;
+  };
+
+  const startStreamedAudio = (turnId) => {
+    stopStreamedAudio();
+    if (!window.MediaSource || !MediaSource.isTypeSupported('audio/mpeg')) return false;
+    const mediaSource = new MediaSource();
+    const url = URL.createObjectURL(mediaSource);
+    const audio = new Audio(url);
+    const stream = { turnId, mediaSource, url, audio, sourceBuffer: null, queue: [], ended: false };
+    streamedAudioRef.current = stream;
+    mediaSource.addEventListener('sourceopen', () => {
+      if (streamedAudioRef.current !== stream) return;
+      try {
+        stream.sourceBuffer = mediaSource.addSourceBuffer('audio/mpeg');
+        stream.sourceBuffer.addEventListener('updateend', () => {
+          if (stream.queue.length) stream.sourceBuffer.appendBuffer(stream.queue.shift());
+          else if (stream.ended && mediaSource.readyState === 'open') mediaSource.endOfStream();
+        });
+        if (stream.queue.length) stream.sourceBuffer.appendBuffer(stream.queue.shift());
+        audio.play().catch(() => {});
+      } catch (error) { console.warn('Streaming audio unavailable', error); }
+    });
+    return true;
+  };
+
+  const appendStreamedAudio = (turnId, base64Audio) => {
+    const stream = streamedAudioRef.current;
+    if (!stream || stream.turnId !== turnId) return;
+    const bytes = base64ToBytes(base64Audio);
+    if (stream.sourceBuffer && !stream.sourceBuffer.updating && !stream.queue.length) stream.sourceBuffer.appendBuffer(bytes);
+    else stream.queue.push(bytes);
+  };
+
+  const finishStreamedAudio = (turnId) => {
+    const stream = streamedAudioRef.current;
+    if (stream && stream.turnId === turnId) {
+      stream.ended = true;
+      if (stream.sourceBuffer && !stream.sourceBuffer.updating && !stream.queue.length && stream.mediaSource.readyState === 'open') {
+        stream.mediaSource.endOfStream();
+      }
+    }
+  };
+
+  const VAD_THRESHOLD = 0.02; // simple RMS threshold, tweak as needed
+  const VAD_SILENCE_MS = 700; // consider end of speech after this many ms of low energy
+
+  const startVAD = async () => {
+    try {
+      // Acquire audio stream once for VAD/recording
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+      vadStreamRef.current = stream;
+
+      const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+      const ac = new AudioContextCtor();
+      audioContextRef.current = ac;
+      const src = ac.createMediaStreamSource(stream);
+
+      // Prefer AudioWorklet-based VAD when available
+      let usingWorklet = false;
+      try {
+        const workletUrl = '/src/worklets/vad-processor.js';
+        // fetch the worklet file and register via blob to be robust under dev servers
+        const res = await fetch(workletUrl);
+        if (res.ok) {
+          const code = await res.text();
+          const blob = new Blob([code], { type: 'application/javascript' });
+          const blobUrl = URL.createObjectURL(blob);
+          await audioContextRef.current.audioWorklet.addModule(blobUrl);
+          const node = new AudioWorkletNode(audioContextRef.current, 'vad-processor', { processorOptions: { threshold: VAD_THRESHOLD, speechConfirmFrames: 4, silenceConfirmFrames: 260 } });
+          node.port.onmessage = (e) => {
+            const { event } = e.data;
+            if (event === 'speech_detected') {
+              // mimic start of speech
+              if (!mediaRecorderRef.current || mediaRecorderRef.current.state !== 'recording') {
+                stopCurrentAudio();
+                const nextTurnId = Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
+                turnIdRef.current = nextTurnId;
+                activeRecordingTurnId = nextTurnId;
+                setCurrentTurnId(nextTurnId);
+                audioChunksRef.current = [];
+                try {
+                  mediaRecorderRef.current.start(250);
+                  // notify server of new speech turn
+                  sendWsJson({ event: 'speech_start', turn_id: nextTurnId });
+                } catch {}
+                setIsRecording(true);
+                setVoiceState('listening');
+                setStatusMessage('Listening (hands-free)...');
+              }
+            } else if (event === 'silence_detected') {
+              if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+                try { mediaRecorderRef.current.stop(); } catch {}
+                setIsRecording(false);
+                setIsProcessing(true);
+                setVoiceState('processing');
+                setStatusMessage('Elena is thinking and synthesizing voice...');
+              }
+            }
+          };
+          src.connect(node);
+          usingWorklet = true;
+        }
+      } catch (e) {
+        console.warn('AudioWorklet VAD unavailable, falling back to analyser-based VAD', e);
+      }
+
+      if (!usingWorklet) {
+        const analyser = ac.createAnalyser();
+        analyser.fftSize = 2048;
+        src.connect(analyser);
+        analyserRef.current = analyser;
+      }
+
+      vadSilenceStartRef.current = null;
+      // if mediaRecorder not initialized, initialize it here so stop/start can be called
+      const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus' : 'audio/webm';
+      const mediaRecorder = new MediaRecorder(stream, { mimeType });
+      mediaRecorderRef.current = mediaRecorder;
+      audioChunksRef.current = [];
+      let activeRecordingTurnId = null;
+
+      mediaRecorder.ondataavailable = (event) => {
+        if (event.data && event.data.size > 0) audioChunksRef.current.push(event.data);
+        // stream chunk over websocket (best-effort)
+        audioSendQueueRef.current = audioSendQueueRef.current.then(async () => {
+          try {
+            if (!event.data || !wsRef.current) return;
+            const arrayBuffer = await event.data.arrayBuffer();
+            let binary = '';
+            const bytes = new Uint8Array(arrayBuffer);
+            const chunkSize = 0x8000;
+            for (let i = 0; i < bytes.length; i += chunkSize) {
+              binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
+            }
+            const b64 = btoa(binary);
+            sendWsJson({ event: 'audio_chunk', turn_id: activeRecordingTurnId, audio: b64 });
+          } catch (e) {
+            // ignore streaming failures; we'll fallback to HTTP upload
+          }
+        });
+      };
+
+      mediaRecorder.onstop = async () => {
+        const audioBlob = new Blob(audioChunksRef.current, { type: mediaRecorder.mimeType });
+        const capturedText = finalTranscriptRef.current.trim();
+        // inform server that speech ended for this turn
+        const completedTurnId = activeRecordingTurnId;
+        await audioSendQueueRef.current;
+        const sentToWebSocket = sendWsJson({ event: 'speech_end', turn_id: completedTurnId });
+        audioChunksRef.current = [];
+        if (!sentToWebSocket) await handleAudioSubmit(audioBlob, capturedText);
+      };
+
+      const poll = () => {
+        try {
+          const buf = new Uint8Array(analyserRef.current.fftSize);
+          analyserRef.current.getByteTimeDomainData(buf);
+          // compute RMS
+          let sum = 0;
+          for (let i = 0; i < buf.length; i++) {
+            const v = (buf[i] - 128) / 128;
+            sum += v * v;
+          }
+          const rms = Math.sqrt(sum / buf.length);
+
+          const now = performance.now();
+          if (rms > VAD_THRESHOLD) {
+            // voice detected
+            vadSilenceStartRef.current = null;
+            if (!mediaRecorderRef.current || mediaRecorderRef.current.state !== 'recording') {
+              // start a new turn
+              stopCurrentAudio(); // interrupt any TTS
+              const nextTurnId = Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
+              turnIdRef.current = nextTurnId;
+              activeRecordingTurnId = nextTurnId;
+              setCurrentTurnId(nextTurnId);
+              audioChunksRef.current = [];
+              try { mediaRecorderRef.current.start(250); } catch {}
+              sendWsJson({ event: 'speech_start', turn_id: nextTurnId });
+              setIsRecording(true);
+              setVoiceState('listening');
+              setStatusMessage('Listening (hands-free)...');
+            }
+          } else {
+            // low energy
+            if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+              if (!vadSilenceStartRef.current) vadSilenceStartRef.current = now;
+              else if (now - vadSilenceStartRef.current > VAD_SILENCE_MS) {
+                try { mediaRecorderRef.current.stop(); } catch {}
+                setIsRecording(false);
+                setIsProcessing(true);
+                setVoiceState('processing');
+                setStatusMessage('Elena is thinking and synthesizing voice...');
+                vadSilenceStartRef.current = null;
+              }
+            }
+          }
+        } catch (e) {
+          // ignore sampling errors
+        }
+        vadRafRef.current = requestAnimationFrame(poll);
+      };
+
+      vadRafRef.current = requestAnimationFrame(poll);
+    } catch (e) {
+      console.warn('VAD start failed', e);
+    }
+  };
+
+  const stopVAD = () => {
+    if (vadRafRef.current) {
+      cancelAnimationFrame(vadRafRef.current);
+      vadRafRef.current = null;
+    }
+    if (analyserRef.current) {
+      try { analyserRef.current.disconnect(); } catch {}
+      analyserRef.current = null;
+    }
+    if (audioContextRef.current) {
+      try { audioContextRef.current.close(); } catch {}
+      audioContextRef.current = null;
+    }
+    if (vadStreamRef.current) {
+      vadStreamRef.current.getTracks().forEach((t) => t.stop());
+      vadStreamRef.current = null;
+    }
+    // also stop any ongoing recorder
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+      try { mediaRecorderRef.current.stop(); } catch {}
     }
   };
 
@@ -49,7 +319,62 @@ export default function VoiceModal({ isOpen, onClose, user, onUpdate, initialAss
       }
       setTranscript('');
       setLiveTranscript('');
+      setIsInterrupted(false);
+      setVoiceState('idle');
       finalTranscriptRef.current = '';
+      // open websocket connection for streaming voice
+      try {
+        const WS_URL = `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.hostname}:8000/voice/ws/${user?.id}`;
+        const ws = new WebSocket(WS_URL);
+        wsRef.current = ws;
+        ws.onopen = () => { console.info('Voice WS connected'); };
+        ws.onmessage = (ev) => {
+          try {
+            const msg = JSON.parse(ev.data);
+            if (msg.event === 'turn_invalidated') {
+              stopCurrentAudio();
+              setIsInterrupted(true);
+              setVoiceState('interrupted');
+              setStatusMessage('Previous response cancelled by new input');
+            } else if (msg.event === 'assistant_response') {
+              const text = msg.text || '';
+              const audio_b64 = msg.audio_base64 || null;
+              setAssistantText(text);
+              setCurrentAudioBase64(audio_b64);
+              setHistory(msg.history || []);
+              setVoiceState('speaking');
+              setStatusMessage('Elena responded!');
+              stopCurrentAudio();
+              playRimeAudio(audio_b64, text, () => { setVoiceState('idle'); });
+            } else if (msg.event === 'tts_start') {
+              if (msg.turn_id === turnIdRef.current) {
+                setVoiceState('speaking');
+                startStreamedAudio(msg.turn_id);
+              }
+            } else if (msg.event === 'tts_chunk') {
+              if (msg.turn_id === turnIdRef.current) appendStreamedAudio(msg.turn_id, msg.audio);
+            } else if (msg.event === 'tts_end') {
+              finishStreamedAudio(msg.turn_id);
+            } else if (msg.event === 'assistant_complete') {
+              if (msg.turn_id !== turnIdRef.current) return;
+              setTranscript(msg.user_text || '');
+              setAssistantText(msg.text || '');
+              setHistory(msg.history || []);
+              setIsProcessing(false);
+              setStatusMessage('Elena responded!');
+              if (onUpdate) onUpdate();
+            } else if (msg.event === 'stale_turn') {
+              setIsInterrupted(true);
+              setVoiceState('interrupted');
+              setStatusMessage('Discarded older turn');
+            }
+          } catch (e) { console.warn('WS parse error', e); }
+        };
+        ws.onclose = () => { wsRef.current = null; };
+        ws.onerror = (e) => console.warn('WS error', e);
+      } catch (e) {
+        console.warn('WebSocket init failed', e);
+      }
     } else {
       // Cleanup when closed
       if (recognitionRef.current) {
@@ -61,8 +386,22 @@ export default function VoiceModal({ isOpen, onClose, user, onUpdate, initialAss
       if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
         try { window.speechSynthesis.cancel(); } catch {}
       }
+      // close websocket
+      try { if (wsRef.current) wsRef.current.close(); } catch (e) {}
     }
   }, [isOpen, user, initialAssistantText, initialAudioBase64]);
+
+  // Start or stop VAD when handsFree toggled or modal opened/closed
+  useEffect(() => {
+    if (isOpen && handsFree) {
+      startVAD();
+    } else {
+      stopVAD();
+    }
+    // cleanup when component unmounts
+    return () => stopVAD();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen, handsFree]);
 
   if (!isOpen) return null;
 
@@ -76,7 +415,10 @@ export default function VoiceModal({ isOpen, onClose, user, onUpdate, initialAss
       stopCurrentAudio();
       const nextTurnId = Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
       turnIdRef.current = nextTurnId;
+      const recordingTurnId = nextTurnId;
       setCurrentTurnId(nextTurnId);
+      setIsInterrupted(false);
+      setVoiceState('listening');
 
       // 1. Initialize Browser Web Speech API for real-time live on-screen text
       const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -131,20 +473,38 @@ export default function VoiceModal({ isOpen, onClose, user, onUpdate, initialAss
       mediaRecorderRef.current = mediaRecorder;
 
       mediaRecorder.ondataavailable = (event) => {
-        if (event.data.size > 0) {
+        if (event.data && event.data.size > 0) {
           audioChunksRef.current.push(event.data);
+          audioSendQueueRef.current = audioSendQueueRef.current.then(async () => {
+            try {
+              if (!event.data || !wsRef.current) return;
+              const arrayBuffer = await event.data.arrayBuffer();
+              let binary = '';
+              const bytes = new Uint8Array(arrayBuffer);
+              const chunkSize = 0x8000;
+              for (let i = 0; i < bytes.length; i += chunkSize) {
+                binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
+              }
+              const b64 = btoa(binary);
+              sendWsJson({ event: 'audio_chunk', turn_id: recordingTurnId, audio: b64 });
+            } catch (e) {}
+          });
         }
       };
 
       mediaRecorder.onstop = async () => {
-          const audioBlob = new Blob(audioChunksRef.current, { type: mimeType });
+        const audioBlob = new Blob(audioChunksRef.current, { type: mimeType });
         const capturedText = finalTranscriptRef.current.trim();
-        await handleAudioSubmit(audioBlob, capturedText);
+        await audioSendQueueRef.current;
+        const sentToWebSocket = sendWsJson({ event: 'speech_end', turn_id: recordingTurnId });
+        if (!sentToWebSocket) await handleAudioSubmit(audioBlob, capturedText);
         stream.getTracks().forEach((track) => track.stop());
       };
 
       mediaRecorder.start(250); // Slice every 250ms for smooth capture
+      try { sendWsJson({ event: 'speech_start', turn_id: recordingTurnId }); } catch (e) {}
       setIsRecording(true);
+      setVoiceState('listening');
       setStatusMessage('Listening to you... Speak naturally.');
     } catch (err) {
       console.error('Microphone access error:', err);
@@ -160,6 +520,7 @@ export default function VoiceModal({ isOpen, onClose, user, onUpdate, initialAss
       mediaRecorderRef.current.stop();
       setIsRecording(false);
       setIsProcessing(true);
+      setVoiceState('processing');
       setStatusMessage('Elena is thinking and synthesizing voice...');
     }
   };
@@ -170,6 +531,8 @@ export default function VoiceModal({ isOpen, onClose, user, onUpdate, initialAss
       const result = await processAudioTurn(user.id, audioBlob, history, liveCapturedText, activeTurnId);
 
       if (result.stale) {
+        setIsInterrupted(true);
+        setVoiceState('interrupted');
         setStatusMessage('Newest instruction received. Discarding older response.');
         return;
       }
@@ -180,12 +543,14 @@ export default function VoiceModal({ isOpen, onClose, user, onUpdate, initialAss
       setAssistantText(result.assistant_text);
       setCurrentAudioBase64(result.audio_base64 || null);
       setHistory(result.history);
+      setVoiceState('speaking');
       setStatusMessage('Elena responded!');
       stopCurrentAudio();
       const audio = await playRimeAudio(result.audio_base64, result.assistant_text, () => {
         if (activeAudioRef.current && activeAudioRef.current.src === audio?.src) {
           activeAudioRef.current = null;
         }
+        setVoiceState('idle');
       });
       activeAudioRef.current = audio;
       if (onUpdate) onUpdate();
@@ -196,6 +561,8 @@ export default function VoiceModal({ isOpen, onClose, user, onUpdate, initialAss
           const activeTurnId = turnIdRef.current || currentTurnId;
           const fallbackRes = await processVoiceTurn(user.id, liveCapturedText, history, activeTurnId);
           if (fallbackRes.stale) {
+            setIsInterrupted(true);
+            setVoiceState('interrupted');
             setStatusMessage('Newest instruction received. Discarding older response.');
             return;
           }
@@ -204,12 +571,14 @@ export default function VoiceModal({ isOpen, onClose, user, onUpdate, initialAss
           setAssistantText(fallbackRes.assistant_text);
           setCurrentAudioBase64(fallbackRes.audio_base64 || null);
           setHistory(fallbackRes.history);
+          setVoiceState('speaking');
           setStatusMessage('Elena responded!');
           stopCurrentAudio();
           const audio = await playRimeAudio(fallbackRes.audio_base64, fallbackRes.assistant_text, () => {
             if (activeAudioRef.current && activeAudioRef.current.src === audio?.src) {
               activeAudioRef.current = null;
             }
+            setVoiceState('idle');
           });
           activeAudioRef.current = audio;
           if (onUpdate) onUpdate();
@@ -232,6 +601,7 @@ export default function VoiceModal({ isOpen, onClose, user, onUpdate, initialAss
     setCurrentTurnId(nextTurnId);
 
     setIsProcessing(true);
+    setVoiceState('processing');
     setStatusMessage('Elena is thinking...');
     setTranscript(text);
     setLiveTranscript('');
@@ -240,6 +610,8 @@ export default function VoiceModal({ isOpen, onClose, user, onUpdate, initialAss
     try {
       const result = await processVoiceTurn(user.id, text, history, nextTurnId);
       if (result.stale) {
+        setIsInterrupted(true);
+        setVoiceState('interrupted');
         setStatusMessage('Newest instruction received. Discarding older response.');
         return;
       }
@@ -247,11 +619,13 @@ export default function VoiceModal({ isOpen, onClose, user, onUpdate, initialAss
       setAssistantText(result.assistant_text);
       setCurrentAudioBase64(result.audio_base64 || null);
       setHistory(result.history);
+      setVoiceState('speaking');
       setStatusMessage('Elena responded!');
       const audio = await playRimeAudio(result.audio_base64, result.assistant_text, () => {
         if (activeAudioRef.current && activeAudioRef.current.src === audio?.src) {
           activeAudioRef.current = null;
         }
+        setVoiceState('idle');
       });
       activeAudioRef.current = audio;
       if (onUpdate) onUpdate();
@@ -277,6 +651,28 @@ export default function VoiceModal({ isOpen, onClose, user, onUpdate, initialAss
               <p className="text-xs text-emerald-100 font-medium">Powered by Rime TTS & Conversational AI</p>
             </div>
           </div>
+          <div className={`px-3 py-1.5 rounded-full text-xs font-bold border ${
+            voiceState === 'interrupted'
+              ? 'bg-rose-100 text-rose-700 border-rose-300'
+              : voiceState === 'listening'
+              ? 'bg-sky-100 text-sky-700 border-sky-300'
+              : voiceState === 'processing'
+              ? 'bg-amber-100 text-amber-700 border-amber-300'
+              : voiceState === 'speaking'
+              ? 'bg-emerald-100 text-emerald-700 border-emerald-300'
+              : 'bg-slate-100 text-slate-700 border-slate-300'
+          }`}>
+            {voiceState === 'interrupted' ? 'INTERRUPTED' : voiceState === 'listening' ? 'LISTENING' : voiceState === 'processing' ? 'PROCESSING' : voiceState === 'speaking' ? 'SPEAKING' : 'IDLE'}
+          </div>
+          <button
+            onClick={() => setHandsFree((v) => !v)}
+            className={`px-3 py-1.5 rounded-full text-xs font-bold mr-2 border ${
+              handsFree ? 'bg-sky-600 text-white border-sky-600' : 'bg-white text-slate-700 border-slate-200'
+            }`}
+            title="Toggle hands-free listening"
+          >
+            {handsFree ? 'Hands-Free: ON' : 'Hands-Free: OFF'}
+          </button>
           <button
             onClick={onClose}
             className="p-2 rounded-full hover:bg-emerald-700/60 transition-colors text-emerald-100 hover:text-white"

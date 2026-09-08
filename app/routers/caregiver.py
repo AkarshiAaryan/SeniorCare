@@ -6,6 +6,7 @@ from pydantic import BaseModel, ConfigDict
 
 from app.database import get_db
 from app import models
+from app.services.notifications import notify_panic
 
 router = APIRouter(prefix="/caregiver", tags=["Caregiver Dashboard & Analytics"])
 
@@ -117,16 +118,18 @@ def get_caregiver_patients(caregiver_id: int, db: Session = Depends(get_db)):
     if not caregiver:
         raise HTTPException(status_code=404, detail="Caregiver not found")
 
-    # If caregiver has no assigned users, check if there are unassigned users and assign one
+    # If caregiver has no assigned users, check for unassigned users and assign only one
     if not caregiver.users:
-        all_users = db.query(models.User).all()
-        if all_users:
-            for u in all_users:
-                u.caregiver_id = caregiver_id
+        unassigned = db.query(models.User).filter(models.User.caregiver_id == None).all()
+        if unassigned:
+            # Assign the first unassigned user to this caregiver (do not mass-assign)
+            first = unassigned[0]
+            first.caregiver_id = caregiver.id
             db.commit()
-            db.refresh(caregiver)
+            # reload caregiver to pick up relationship
+            caregiver = db.query(models.Caregiver).filter(models.Caregiver.id == caregiver_id).first()
         else:
-            # Create a default patient
+            # Create a default patient for demo/demo-users
             default_user = models.User(
                 name="Arthur Pendelton",
                 age=82,
@@ -135,7 +138,7 @@ def get_caregiver_patients(caregiver_id: int, db: Session = Depends(get_db)):
             )
             db.add(default_user)
             db.commit()
-            db.refresh(caregiver)
+            caregiver = db.query(models.Caregiver).filter(models.Caregiver.id == caregiver_id).first()
 
     result = []
     for user in caregiver.users:
@@ -202,6 +205,13 @@ def trigger_panic_alert(req: PanicRequest, db: Session = Depends(get_db)):
     db.add(panic_event)
     db.commit()
     db.refresh(panic_event)
+    # Send notification(s) to caregiver/admin and write an audit trail
+    try:
+        notify_panic(user, message, req.location)
+    except Exception:
+        # do not fail the endpoint if notification delivery fails; alert still logged
+        pass
+
     return panic_event
 
 
