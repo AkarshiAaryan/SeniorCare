@@ -67,9 +67,6 @@ export default function ElderView({ user, onRefresh }) {
             setInitialAssistantText(outreach.spoken_text);
             setInitialAudioBase64(outreach.audio_base64);
             setIsVoiceOpen(true);
-            if (outreach.spoken_text || outreach.audio_base64) {
-              playRimeAudio(outreach.audio_base64, outreach.spoken_text).catch(e => console.warn('Autoplay audio:', e));
-            }
           }
         }
       } catch (err) {
@@ -95,7 +92,6 @@ export default function ElderView({ user, onRefresh }) {
         setInitialAssistantText(res.spoken_text);
         setInitialAudioBase64(res.audio_base64);
         setIsVoiceOpen(true);
-        playRimeAudio(res.audio_base64, res.spoken_text).catch(e => console.warn('Simulation audio:', e));
       }
     } catch (err) {
       console.error('Simulate check-in error:', err);

@@ -193,15 +193,44 @@ export async function triggerProactivePrompt(userId, reasonType = '3_hour_checki
   return res.json();
 }
 
-export async function playRimeAudio(base64Audio, textFallback = '', onStop = null) {
+let activeAudioInstance = null;
+let activePlaybackGeneration = 0;
+
+export function stopRimeAudio() {
+  activePlaybackGeneration++;
+  if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+    try { window.speechSynthesis.cancel(); } catch {}
+  }
+  if (activeAudioInstance) {
+    try {
+      activeAudioInstance.pause();
+      activeAudioInstance.currentTime = 0;
+    } catch {}
+    activeAudioInstance = null;
+  }
+}
+
+export async function playRimeAudio(base64Audio, textFallback = '', onStop = null, playbackGeneration = null) {
+  stopRimeAudio();
+  const currentGen = playbackGeneration !== null ? playbackGeneration : ++activePlaybackGeneration;
+
   // 1. If base64Audio from Rime TTS is present and valid audio stream
   if (base64Audio && base64Audio.length > 200 && !base64Audio.includes('MockRimeAudioStreamData')) {
     try {
       const audio = new Audio(`data:audio/mpeg;base64,${base64Audio}`);
-      if (onStop) {
-        audio.addEventListener('pause', onStop);
-        audio.addEventListener('ended', onStop);
-      }
+      activeAudioInstance = audio;
+
+      const handleEnd = () => {
+        if (activePlaybackGeneration === currentGen) {
+          activeAudioInstance = null;
+          if (onStop) onStop();
+        }
+      };
+
+      audio.addEventListener('pause', handleEnd);
+      audio.addEventListener('ended', handleEnd);
+      audio.addEventListener('error', handleEnd);
+
       await audio.play();
       return audio;
     } catch (err) {
@@ -212,7 +241,7 @@ export async function playRimeAudio(base64Audio, textFallback = '', onStop = nul
   // 2. Immediate SpeechSynthesis Fallback (Natural, gentle female voice for elderly)
   if (textFallback && typeof window !== 'undefined' && 'speechSynthesis' in window) {
     try {
-      window.speechSynthesis.cancel(); // Stop any pending utterances
+      window.speechSynthesis.cancel();
       const utterance = new SpeechSynthesisUtterance(textFallback);
       utterance.rate = 0.95; // Gentle speaking pace for senior clarity
       utterance.pitch = 1.05; // Friendly, warm pitch
@@ -226,13 +255,24 @@ export async function playRimeAudio(base64Audio, textFallback = '', onStop = nul
         utterance.voice = friendlyVoice;
       }
 
-      if (onStop) {
-        utterance.onend = onStop;
-      }
+      utterance.onend = () => {
+        if (activePlaybackGeneration === currentGen && onStop) {
+          onStop();
+        }
+      };
+      utterance.onerror = () => {
+        if (activePlaybackGeneration === currentGen && onStop) {
+          onStop();
+        }
+      };
+
       window.speechSynthesis.speak(utterance);
     } catch (synthErr) {
       console.warn('Speech synthesis playback error:', synthErr);
+      if (onStop) onStop();
     }
+  } else if (onStop) {
+    onStop();
   }
 
   return null;

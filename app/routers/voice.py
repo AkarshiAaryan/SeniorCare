@@ -49,6 +49,7 @@ class VoiceTurnResponse(BaseModel):
     turn_id: str = ""
     stale: bool = False
     cached: bool = False
+    echo_rejected: bool = False
     intent: Optional[str] = None
     confidence: Optional[float] = None
     context_state: Optional[str] = None

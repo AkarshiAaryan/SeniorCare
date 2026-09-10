@@ -128,6 +128,39 @@ class VoiceOrchestrator:
         last_assistant_msg = next((m.get("content", "") for m in reversed(conv_history) if m.get("role") == "assistant"), "")
         active_context_state = context_state or voice_intent_predictor.infer_conversational_state(last_assistant_msg, conv_history)
 
+        # Acoustic Echo Defense: Reject turns where user_text is an acoustic reflection of Elena's speech
+        if last_assistant_msg and user_text:
+            u_tokens = set(user_text.lower().replace(".", "").replace(",", "").replace("?", "").replace("!", "").split())
+            a_tokens = set(last_assistant_msg.lower().replace(".", "").replace(",", "").replace("?", "").replace("!", "").split())
+            if u_tokens and len(u_tokens) >= 3:
+                overlap = len(u_tokens.intersection(a_tokens)) / len(u_tokens)
+                if overlap >= 0.70:
+                    logger.warning(f"ACOUSTIC ECHO REJECTED! Utterance matched assistant speech: '{user_text}'")
+                    return {
+                        "user_text": user_text,
+                        "assistant_text": "",
+                        "audio_base64": "",
+                        "audio_format": "audio/mpeg",
+                        "extracted_health": {},
+                        "history": conv_history,
+                        "conversation_id": None,
+                        "turn_id": turn_id,
+                        "stale": False,
+                        "cached": False,
+                        "echo_rejected": True,
+                        "intent": "echo_ignored",
+                        "confidence": 1.0,
+                        "context_state": active_context_state,
+                        "latency_ms": {
+                            "total": 0.0,
+                            "stt": stt_latency_ms,
+                            "nlp": 0.0,
+                            "cache_lookup": 0.0,
+                            "llm": 0.0,
+                            "tts": 0.0
+                        }
+                    }
+
         conv_history.append({"role": "user", "content": user_text})
 
         # Fetch user medications and recent health telemetry
