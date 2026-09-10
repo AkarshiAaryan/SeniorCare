@@ -12,6 +12,8 @@ from app.services.rime_tts import rime_service
 from app.services.stt import stt_service
 from app.services.llm_agent import llm_agent
 from app.services.voice_orchestrator import voice_orchestrator
+from app.services.voice_prefetcher import voice_prefetcher
+from app.services.rime_voice_cache import rime_voice_cache
 from app import models
 
 logger = logging.getLogger("VoiceRouter")
@@ -33,6 +35,7 @@ class VoiceTurnRequest(BaseModel):
     speed: Optional[float] = None
     history: Optional[List[dict]] = None
     turn_id: Optional[str] = None
+    context_state: Optional[str] = None
 
 
 class VoiceTurnResponse(BaseModel):
@@ -45,6 +48,19 @@ class VoiceTurnResponse(BaseModel):
     conversation_id: Optional[int] = None
     turn_id: str = ""
     stale: bool = False
+    cached: bool = False
+    intent: Optional[str] = None
+    confidence: Optional[float] = None
+    context_state: Optional[str] = None
+    latency_ms: Optional[dict] = None
+
+
+class PrefetchRequest(BaseModel):
+    user_id: Optional[int] = None
+    user_name: Optional[str] = "Friend"
+    context_state: Optional[str] = "wellness_check"
+    assistant_text: Optional[str] = None
+    k: Optional[int] = 2
 
 
 class ProactiveCheckResponse(BaseModel):
@@ -61,6 +77,7 @@ class ProactiveTriggerRequest(BaseModel):
     user_id: int
     reason_type: str = "3_hour_checkin"  # "3_hour_checkin" or "medication_due"
     details: Optional[str] = "Daily wellness check"
+
 
 
 # --- Endpoints ---
@@ -105,6 +122,7 @@ async def process_turn(
 ):
     """
     Process a text-based conversational turn: LLM response -> Rime TTS -> Data extraction -> DB save.
+    Accelerated with predictive Rime voice cache for instant (sub-10ms) responses.
     """
     try:
         result = await voice_orchestrator.process_turn(
@@ -114,7 +132,8 @@ async def process_turn(
             history=req.history,
             speaker=req.speaker,
             speed=req.speed,
-            turn_id=req.turn_id
+            turn_id=req.turn_id,
+            context_state=req.context_state
         )
         return result
     except ValueError as ve:
@@ -133,11 +152,12 @@ async def process_audio_turn(
     speaker: Optional[str] = Form(None),
     speed: Optional[float] = Form(None),
     turn_id: Optional[str] = Form(None),
+    context_state: Optional[str] = Form(None),
     db: Session = Depends(get_db)
 ):
     """
     Process an audio or speech-based conversational turn from microphone:
-    Audio/Live STT -> LLM response -> Rime TTS -> Data extraction -> DB save.
+    Audio/Live STT -> Predictive Cache / LLM response -> Rime TTS -> Data extraction -> DB save.
     """
     try:
         audio_bytes = None
@@ -157,7 +177,8 @@ async def process_audio_turn(
             history=history,
             speaker=speaker,
             speed=speed,
-            turn_id=turn_id
+            turn_id=turn_id,
+            context_state=context_state
         )
         return result
     except ValueError as ve:
@@ -165,6 +186,65 @@ async def process_audio_turn(
     except Exception as e:
         logger.error(f"Audio voice turn error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/prefetch")
+async def prefetch_voice_responses(req: PrefetchRequest, db: Session = Depends(get_db)):
+    """
+    Explicitly pre-generates and caches Rime TTS responses for anticipated user intents
+    in the background for a given context or assistant speech.
+    """
+    user_name = req.user_name or "Friend"
+    if req.user_id:
+        user = db.query(models.User).filter(models.User.id == req.user_id).first()
+        if user and user.name:
+            user_name = user.name
+
+    if req.assistant_text:
+        entries = await voice_prefetcher.prefetch_for_assistant_utterance(
+            assistant_text=req.assistant_text,
+            user_name=user_name,
+            k=req.k
+        )
+    else:
+        state = req.context_state or "wellness_check"
+        entries = await voice_prefetcher.prefetch_for_context(
+            context_state=state,
+            user_name=user_name,
+            k=req.k
+        )
+
+    return {
+        "status": "success",
+        "prefetched_count": len(entries),
+        "cached_entries": [
+            {
+                "context_state": e.context_state,
+                "intent": e.intent,
+                "text": e.text,
+                "audio_size_bytes": e.audio_size_bytes,
+                "cache_key": e.cache_key
+            }
+            for e in entries
+        ]
+    }
+
+
+@router.get("/cache-stats")
+async def get_voice_cache_stats():
+    """
+    Returns statistics and telemetry for the Rime predictive voice cache.
+    """
+    return rime_voice_cache.get_stats()
+
+
+@router.delete("/cache")
+async def clear_voice_cache():
+    """
+    Clears in-memory and persistent disk voice cache.
+    """
+    cleared = rime_voice_cache.clear()
+    return {"status": "success", "cleared_entries": cleared}
 
 
 @router.get("/proactive-check/{user_id}", response_model=ProactiveCheckResponse)
@@ -202,6 +282,14 @@ async def check_proactive_outreach(user_id: int, db: Session = Depends(get_db)):
     # Synthesize audio with Rime TTS
     audio_bytes = await rime_service.synthesize(proactive_text)
     audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
+
+    # Trigger background prefetch for senior's anticipated response
+    target_state = "medication_check" if reason_type == "medication_due" else "wellness_check"
+    voice_prefetcher.trigger_background_prefetch(
+        context_state_or_text=target_state,
+        user_name=user.name,
+        is_utterance=False
+    )
 
     return ProactiveCheckResponse(
         has_proactive_prompt=True,
@@ -251,6 +339,14 @@ async def trigger_proactive_prompt(req: ProactiveTriggerRequest, db: Session = D
     # Synthesize audio with Rime TTS
     audio_bytes = await rime_service.synthesize(proactive_text)
     audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
+
+    # Trigger background prefetch for senior's anticipated response
+    target_state = "medication_check" if req.reason_type == "medication_due" else "wellness_check"
+    voice_prefetcher.trigger_background_prefetch(
+        context_state_or_text=target_state,
+        user_name=user.name,
+        is_utterance=False
+    )
 
     return ProactiveCheckResponse(
         has_proactive_prompt=True,

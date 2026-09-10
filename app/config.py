@@ -25,5 +25,13 @@ class Settings:
     # STT Settings
     STT_PROVIDER: str = os.getenv("STT_PROVIDER", "gemini")  # 'gemini', 'openai', 'groq', or 'mock'
 
+    # Predictive Voice-Response Prefetching Settings
+    PREFETCH_ENABLED: bool = os.getenv("PREFETCH_ENABLED", "true").lower() in ("true", "1", "yes")
+    PREFETCH_TOP_K: int = int(os.getenv("PREFETCH_TOP_K", "2"))
+    PREFETCH_CONFIDENCE_THRESHOLD: float = float(os.getenv("PREFETCH_CONFIDENCE_THRESHOLD", "0.75"))
+    PREFETCH_CACHE_DIR: str = os.getenv("PREFETCH_CACHE_DIR", ".voice_cache")
+    PREFETCH_LOGGING: bool = os.getenv("PREFETCH_LOGGING", "true").lower() in ("true", "1", "yes")
+
 
 settings = Settings()
+

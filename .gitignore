@@ -71,6 +71,6 @@ node_modules/
 frontend/node_modules/
 frontend/dist/
 frontend/.vite/
-.vite/
-.env.local
-.env.*.local
+# Voice Response Cache
+.voice_cache/
+.test_voice_cache/
