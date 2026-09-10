@@ -15,6 +15,7 @@ from app.services.voice_orchestrator import voice_orchestrator
 from app.services.voice_prefetcher import voice_prefetcher
 from app.services.rime_voice_cache import rime_voice_cache
 from app.services.proactive_greeting import proactive_greeting_service
+from app.services.voice_session_manager import voice_session_manager
 from app import models
 
 logger = logging.getLogger("VoiceRouter")
@@ -36,6 +37,8 @@ class VoiceTurnRequest(BaseModel):
     speed: Optional[float] = None
     history: Optional[List[dict]] = None
     turn_id: Optional[str] = None
+    session_id: Optional[str] = None
+    conversation_id: Optional[str] = None
     context_state: Optional[str] = None
 
 
@@ -46,7 +49,9 @@ class VoiceTurnResponse(BaseModel):
     audio_format: str
     extracted_health: dict
     history: List[dict]
-    conversation_id: Optional[int] = None
+    conversation_id: Optional[str] = None
+    db_conversation_id: Optional[int] = None
+    session_id: Optional[str] = None
     turn_id: str = ""
     stale: bool = False
     cached: bool = False
@@ -55,6 +60,23 @@ class VoiceTurnResponse(BaseModel):
     confidence: Optional[float] = None
     context_state: Optional[str] = None
     latency_ms: Optional[dict] = None
+
+
+class SessionInitRequest(BaseModel):
+    user_id: int
+    greeting_type: Optional[str] = "initial_greeting"
+    details: Optional[str] = None
+    force_new: Optional[bool] = False
+
+
+class SessionInitResponse(BaseModel):
+    session_id: str
+    conversation_id: str
+    user_id: int
+    greeting_needed: bool
+    greeting: Optional[dict] = None
+    history: List[dict] = []
+    expires_at: str
 
 
 class PrefetchRequest(BaseModel):
@@ -147,6 +169,8 @@ async def process_turn(
             speaker=req.speaker,
             speed=req.speed,
             turn_id=req.turn_id,
+            session_id=req.session_id,
+            conversation_id=req.conversation_id,
             context_state=req.context_state
         )
         return result
@@ -166,6 +190,8 @@ async def process_audio_turn(
     speaker: Optional[str] = Form(None),
     speed: Optional[float] = Form(None),
     turn_id: Optional[str] = Form(None),
+    session_id: Optional[str] = Form(None),
+    conversation_id: Optional[str] = Form(None),
     context_state: Optional[str] = Form(None),
     db: Session = Depends(get_db)
 ):
@@ -192,6 +218,8 @@ async def process_audio_turn(
             speaker=speaker,
             speed=speed,
             turn_id=turn_id,
+            session_id=session_id,
+            conversation_id=conversation_id,
             context_state=context_state
         )
         return result
@@ -200,6 +228,64 @@ async def process_audio_turn(
     except Exception as e:
         logger.error(f"Audio voice turn error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/session/{user_id}", response_model=SessionInitResponse)
+async def get_or_init_voice_session(
+    user_id: int,
+    greeting_type: str = "initial_greeting",
+    details: Optional[str] = None,
+    force_new: bool = False,
+    db: Session = Depends(get_db)
+):
+    """
+    Initializes or retrieves the authoritative 3-hour voice session and 5-minute active conversation.
+    Ensures initial precomputed Rime greeting is returned exactly ONCE per session.
+    """
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    sess, is_new_session = voice_session_manager.get_or_create_session(user_id, force_new=force_new)
+    conv, _ = voice_session_manager.get_or_create_conversation(sess.session_id, user_id, force_new=force_new)
+
+    greeting_needed = is_new_session or not sess.greeting_sent
+    greeting_data = None
+
+    if greeting_needed:
+        greeting_data = await proactive_greeting_service.get_or_precompute_greeting(
+            user_id=user.id,
+            user_name=user.name,
+            greeting_type=greeting_type,
+            details=details,
+            session_id=sess.session_id,
+            conversation_id=conv.conversation_id
+        )
+        voice_session_manager.mark_greeting_sent(sess.session_id, greeting_data.get("spoken_text") or greeting_data.get("text"))
+
+    return SessionInitResponse(
+        session_id=sess.session_id,
+        conversation_id=conv.conversation_id,
+        user_id=user.id,
+        greeting_needed=greeting_needed,
+        greeting=greeting_data,
+        history=conv.history,
+        expires_at=sess.expires_at.isoformat()
+    )
+
+
+@router.post("/session", response_model=SessionInitResponse)
+async def post_init_voice_session(
+    req: SessionInitRequest,
+    db: Session = Depends(get_db)
+):
+    return await get_or_init_voice_session(
+        user_id=req.user_id,
+        greeting_type=req.greeting_type or "initial_greeting",
+        details=req.details,
+        force_new=bool(req.force_new),
+        db=db
+    )
 
 
 @router.post("/prefetch")
@@ -316,6 +402,10 @@ async def check_proactive_outreach(user_id: int, db: Session = Depends(get_db)):
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
+    # If senior is currently in an active conversation (< 5 min), do not disrupt with proactive check-in
+    if voice_session_manager.is_user_in_active_conversation(user_id):
+        return ProactiveCheckResponse(has_proactive_prompt=False, prompt_needed=False)
+
     # Find earliest unprocessed event
     pending_event = db.query(models.EventLog).filter(
         models.EventLog.user_id == user.id,
@@ -373,8 +463,11 @@ async def trigger_proactive_prompt(req: ProactiveTriggerRequest, db: Session = D
     current_hour = datetime.now().hour
     time_of_day = "Morning" if current_hour < 12 else ("Afternoon" if current_hour < 18 else "Evening")
 
+    norm_reason = (req.reason_type or "").lower().strip()
+    ev_type = "MEDICATION_DUE" if "med" in norm_reason else "CHECK_IN_DUE"
+    greeting_type = "medication_due" if "med" in norm_reason else "3_hour_checkin"
+
     # Create event in DB
-    ev_type = "MEDICATION_DUE" if req.reason_type == "medication_due" else "CHECK_IN_DUE"
     event = models.EventLog(
         event_type=ev_type,
         user_id=user.id,
@@ -390,12 +483,12 @@ async def trigger_proactive_prompt(req: ProactiveTriggerRequest, db: Session = D
     greeting = await proactive_greeting_service.get_or_precompute_greeting(
         user_id=user.id,
         user_name=user.name,
-        greeting_type=req.reason_type,
+        greeting_type=greeting_type,
         details=req.details or "Prescription dose"
     )
 
     # Trigger background prefetch for senior's anticipated response
-    target_state = "medication_check" if req.reason_type == "medication_due" else "wellness_check"
+    target_state = "medication_check" if ev_type == "MEDICATION_DUE" else "wellness_check"
     voice_prefetcher.trigger_background_prefetch(
         context_state_or_text=target_state,
         user_name=user.name,
@@ -420,27 +513,38 @@ async def trigger_proactive_prompt(req: ProactiveTriggerRequest, db: Session = D
 
 
 @router.websocket("/ws/{user_id}")
-async def voice_websocket_endpoint(websocket: WebSocket, user_id: int):
+async def voice_websocket_endpoint(websocket: WebSocket, user_id: int, db: Session = Depends(get_db)):
     """
     Real-time bidirectional WebSocket for streaming voice interactions with elderly users.
+    Uses VoiceSessionManager to preserve conversational context across reconnects.
     """
     await websocket.accept()
-    db = SessionLocal()
-    history = []
     logger.info(f"WebSocket voice session opened for user {user_id}")
 
     try:
-        # Send initial warm greeting
-        greeting_text = "Hello! I am Elena, your care assistant. How are you feeling today?"
-        audio_bytes = await rime_service.synthesize(greeting_text)
-        audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
+        sess, is_new = voice_session_manager.get_or_create_session(user_id)
+        conv, _ = voice_session_manager.get_or_create_conversation(sess.session_id, user_id)
+        history = list(conv.history)
 
-        await websocket.send_json({
-            "event": "assistant_response",
-            "text": greeting_text,
-            "audio_base64": audio_b64
-        })
-        history.append({"role": "assistant", "content": greeting_text})
+        # Send initial warm greeting ONLY if new session or greeting not yet sent
+        if is_new or not sess.greeting_sent:
+            user = db.query(models.User).filter(models.User.id == user_id).first()
+            user_name = user.name if user else "Friend"
+            greeting = await proactive_greeting_service.get_or_precompute_greeting(
+                user_id=user_id,
+                user_name=user_name,
+                session_id=sess.session_id,
+                conversation_id=conv.conversation_id
+            )
+            voice_session_manager.mark_greeting_sent(sess.session_id, greeting.get("spoken_text") or greeting.get("text"))
+            await websocket.send_json({
+                "event": "assistant_response",
+                "text": greeting["spoken_text"],
+                "audio_base64": greeting["audio_base64"],
+                "session_id": sess.session_id,
+                "conversation_id": conv.conversation_id
+            })
+            history = conv.history
 
         while True:
             data = await websocket.receive_json()
@@ -452,7 +556,9 @@ async def voice_websocket_endpoint(websocket: WebSocket, user_id: int):
                     db=db,
                     user_id=user_id,
                     text_input=user_msg,
-                    history=history
+                    history=history,
+                    session_id=sess.session_id,
+                    conversation_id=conv.conversation_id
                 )
                 history = result["history"]
                 await websocket.send_json({
@@ -460,7 +566,9 @@ async def voice_websocket_endpoint(websocket: WebSocket, user_id: int):
                     "user_text": result["user_text"],
                     "text": result["assistant_text"],
                     "audio_base64": result["audio_base64"],
-                    "extracted_health": result["extracted_health"]
+                    "extracted_health": result["extracted_health"],
+                    "session_id": result["session_id"],
+                    "conversation_id": result["conversation_id"]
                 })
 
             elif event_type == "user_audio":
@@ -470,7 +578,9 @@ async def voice_websocket_endpoint(websocket: WebSocket, user_id: int):
                     db=db,
                     user_id=user_id,
                     audio_bytes=audio_bytes_in,
-                    history=history
+                    history=history,
+                    session_id=sess.session_id,
+                    conversation_id=conv.conversation_id
                 )
                 history = result["history"]
                 await websocket.send_json({
@@ -478,7 +588,9 @@ async def voice_websocket_endpoint(websocket: WebSocket, user_id: int):
                     "user_text": result["user_text"],
                     "text": result["assistant_text"],
                     "audio_base64": result["audio_base64"],
-                    "extracted_health": result["extracted_health"]
+                    "extracted_health": result["extracted_health"],
+                    "session_id": result["session_id"],
+                    "conversation_id": result["conversation_id"]
                 })
 
             elif event_type == "ping":

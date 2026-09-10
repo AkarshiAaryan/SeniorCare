@@ -38,18 +38,7 @@ export default function ElderView({ user, onRefresh }) {
   const [isTriggeringProactive, setIsTriggeringProactive] = useState(false);
   const handledEventIdsRef = useRef(new Set());
 
-  const handleOpenVoice = async (greetingType = 'initial_greeting', details = '') => {
-    if (user?.id) {
-      try {
-        const greeting = await getPrecomputedGreeting(user.id, greetingType, details);
-        if (greeting) {
-          setInitialAssistantText(greeting.spoken_text || greeting.text);
-          setInitialAudioBase64(greeting.audio_base64);
-        }
-      } catch (e) {
-        console.warn('Precomputed greeting fetch note:', e);
-      }
-    }
+  const handleOpenVoice = () => {
     setIsVoiceOpen(true);
   };
 

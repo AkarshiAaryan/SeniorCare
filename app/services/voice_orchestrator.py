@@ -17,6 +17,7 @@ from app.services.voice_nlp import voice_nlp
 from app.services.voice_intent_predictor import voice_intent_predictor
 from app.services.rime_voice_cache import rime_voice_cache
 from app.services.voice_prefetcher import voice_prefetcher
+from app.services.voice_session_manager import voice_session_manager
 
 logger = logging.getLogger("VoiceOrchestrator")
 
@@ -55,6 +56,12 @@ class TurnStateStore:
 
         return True
 
+    def is_turn_stale(self, user_id: int, turn_id: Optional[str]) -> bool:
+        return not self.is_active_turn(user_id, turn_id)
+
+    def get_active_turn(self, user_id: int) -> Optional[str]:
+        return self.active_turns.get(user_id)
+
     def invalidate_user(self, user_id: int) -> None:
         self.active_turns.pop(user_id, None)
         self.turn_history.pop(user_id, None)
@@ -75,6 +82,8 @@ class VoiceOrchestrator:
         speaker: Optional[str] = None,
         speed: Optional[float] = None,
         turn_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        conversation_id: Optional[str] = None,
         context_state: Optional[str] = None
     ) -> Dict[str, Any]:
         """
@@ -94,16 +103,27 @@ class VoiceOrchestrator:
         if not user:
             raise ValueError(f"User with ID {user_id} not found.")
 
+        # Resolve authoritative session and conversation
+        sess, _ = voice_session_manager.get_or_create_session(user_id) if not session_id else (voice_session_manager.sessions.get(session_id) or voice_session_manager.get_or_create_session(user_id)[0], False)
+        conv, _ = voice_session_manager.get_or_create_conversation(sess.session_id, user_id) if not conversation_id else (voice_session_manager.conversations.get(conversation_id) or voice_session_manager.get_or_create_conversation(sess.session_id, user_id)[0], False)
+
         turn_id = turn_id or str(uuid.uuid4())
         if not turn_state_store.is_active_turn(user_id, turn_id):
+            voice_session_manager.log_event(
+                "STALE_RESULT_DISCARDED",
+                turn_id=turn_id,
+                user_id=user_id,
+                session_id=sess.session_id
+            )
             return {
                 "user_text": (text_input or "").strip(),
                 "assistant_text": "",
                 "audio_base64": "",
                 "audio_format": "audio/mpeg",
                 "extracted_health": {},
-                "history": history or [],
-                "conversation_id": None,
+                "history": history or conv.history,
+                "conversation_id": conv.conversation_id,
+                "session_id": sess.session_id,
                 "turn_id": turn_id,
                 "stale": True,
                 "cached": False,
@@ -124,18 +144,22 @@ class VoiceOrchestrator:
         stt_latency_ms = (t_stt_end - t_stt_start) * 1000
 
         # 2. Build conversation history & infer context state
-        conv_history = history or []
+        # Retain history from whichever is deeper (client or server) to ensure zero context loss
+        server_hist = list(conv.history)
+        client_hist = list(history or [])
+        conv_history = client_hist if len(client_hist) >= len(server_hist) else server_hist
         last_assistant_msg = next((m.get("content", "") for m in reversed(conv_history) if m.get("role") == "assistant"), "")
         active_context_state = context_state or voice_intent_predictor.infer_conversational_state(last_assistant_msg, conv_history)
 
         # Acoustic Echo Defense: Reject turns where user_text is an acoustic reflection of Elena's speech
         if last_assistant_msg and user_text:
-            u_tokens = set(user_text.lower().replace(".", "").replace(",", "").replace("?", "").replace("!", "").split())
-            a_tokens = set(last_assistant_msg.lower().replace(".", "").replace(",", "").replace("?", "").replace("!", "").split())
+            STOPWORDS = {"i", "am", "you", "are", "how", "is", "a", "the", "and", "to", "in", "it", "of", "my", "me", "for", "that", "this"}
+            u_tokens = [w for w in user_text.lower().replace(".", " ").replace(",", " ").replace("?", " ").replace("!", " ").split() if len(w) > 2 and w not in STOPWORDS]
+            a_tokens = set(w for w in last_assistant_msg.lower().replace(".", " ").replace(",", " ").replace("?", " ").replace("!", " ").split() if len(w) > 2 and w not in STOPWORDS)
             if u_tokens and len(u_tokens) >= 3:
-                overlap = len(u_tokens.intersection(a_tokens)) / len(u_tokens)
-                if overlap >= 0.70:
-                    logger.warning(f"ACOUSTIC ECHO REJECTED! Utterance matched assistant speech: '{user_text}'")
+                overlap = sum(1 for w in u_tokens if w in a_tokens) / len(u_tokens)
+                if overlap >= 0.75:
+                    logger.warning(f"ACOUSTIC ECHO REJECTED! Utterance matched assistant speech: '{user_text}' (overlap: {overlap:.2f})")
                     return {
                         "user_text": user_text,
                         "assistant_text": "",
@@ -298,6 +322,9 @@ class VoiceOrchestrator:
         db.commit()
         db.refresh(db_conv)
 
+        # Record turn authoritatively in VoiceSessionManager
+        voice_session_manager.record_turn(sess.session_id, conv.conversation_id, user_text, ai_response_text)
+
         # 7. Asynchronously trigger background prefetch for the NEXT turn
         voice_prefetcher.trigger_background_prefetch(
             context_state_or_text=ai_response_text,
@@ -315,7 +342,9 @@ class VoiceOrchestrator:
             "audio_format": "audio/mpeg",
             "extracted_health": extracted,
             "history": conv_history,
-            "conversation_id": db_conv.id,
+            "conversation_id": conv.conversation_id,
+            "db_conversation_id": db_conv.id,
+            "session_id": sess.session_id,
             "turn_id": turn_id,
             "stale": False,
             "cached": is_cache_hit,

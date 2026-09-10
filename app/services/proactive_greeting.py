@@ -14,6 +14,7 @@ from app.services.voice_response_store import voice_response_store
 from app.services.rime_voice_cache import rime_voice_cache, compute_rime_cache_key
 from app.services.rime_tts import rime_service
 from app.services.voice_orchestrator import turn_state_store
+from app.services.voice_session_manager import voice_session_manager
 
 logger = logging.getLogger("ProactiveGreetingService")
 
@@ -25,6 +26,8 @@ class ProactiveGreetingService:
         user_name: str = "Friend",
         greeting_type: str = "initial_greeting",
         details: Optional[str] = None,
+        session_id: Optional[str] = None,
+        conversation_id: Optional[str] = None,
         rime_config: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """
@@ -46,7 +49,14 @@ class ProactiveGreetingService:
         }
 
         # 1. Retrieve canonical template
-        template_intent = greeting_type if greeting_type in ["initial_greeting", "3_hour_checkin", "medication_due"] else "initial_greeting"
+        normalized_type = (greeting_type or "").lower().strip()
+        if normalized_type in ["medication_due", "medication", "pill", "medicine"]:
+            template_intent = "medication_due"
+        elif normalized_type in ["3_hour_checkin", "check_in_due", "checkin", "3_hour"]:
+            template_intent = "3_hour_checkin"
+        else:
+            template_intent = "initial_greeting"
+
         text = voice_response_store.get_canonical_response(
             context_state="proactive_greeting",
             intent=template_intent,
@@ -93,6 +103,16 @@ class ProactiveGreetingService:
         turn_id = f"greeting_{uuid.uuid4().hex[:10]}"
         turn_state_store.register_turn(user_id, turn_id)
 
+        # 4. Integrate with session manager
+        if not session_id:
+            sess, _ = voice_session_manager.get_or_create_session(user_id)
+            session_id = sess.session_id
+        if not conversation_id:
+            conv, _ = voice_session_manager.get_or_create_conversation(session_id, user_id)
+            conversation_id = conv.conversation_id
+
+        voice_session_manager.mark_greeting_sent(session_id, text)
+
         return {
             "turn_source": "PROACTIVE_GREETING",
             "audio_source": audio_source,
@@ -101,6 +121,8 @@ class ProactiveGreetingService:
             "audio_base64": audio_base64,
             "audio_format": "audio/mpeg",
             "turn_id": turn_id,
+            "session_id": session_id,
+            "conversation_id": conversation_id,
             "context_state": "wellness_check" if greeting_type != "medication_due" else "medication_check",
             "user_id": user_id,
             "has_proactive_prompt": True,

@@ -129,7 +129,14 @@ export async function getDailyReport(userId, dateStr = null) {
   return res.json();
 }
 
-export async function processVoiceTurn(userId, textInput, history = [], turnId = null) {
+export async function initVoiceSession(userId, greetingType = 'initial_greeting', forceNew = false) {
+  const params = new URLSearchParams({ greeting_type: greetingType, force_new: forceNew });
+  const res = await fetch(`${API_BASE}/voice/session/${userId}?${params.toString()}`);
+  if (!res.ok) throw new Error('Failed to initialize voice session');
+  return res.json();
+}
+
+export async function processVoiceTurn(userId, textInput, history = [], turnId = null, sessionId = null, conversationId = null) {
   const res = await fetch(`${API_BASE}/voice/process-turn`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -137,14 +144,16 @@ export async function processVoiceTurn(userId, textInput, history = [], turnId =
       user_id: userId,
       text_input: textInput,
       history: history,
-      turn_id: turnId
+      turn_id: turnId,
+      session_id: sessionId,
+      conversation_id: conversationId
     })
   });
   if (!res.ok) throw new Error('Voice turn failed');
   return res.json();
 }
 
-export async function processAudioTurn(userId, audioBlob, history = [], textInput = '', turnId = null) {
+export async function processAudioTurn(userId, audioBlob, history = [], textInput = '', turnId = null, sessionId = null, conversationId = null) {
   const formData = new FormData();
   formData.append('user_id', userId);
   
@@ -154,6 +163,14 @@ export async function processAudioTurn(userId, audioBlob, history = [], textInpu
 
   if (turnId) {
     formData.append('turn_id', turnId);
+  }
+
+  if (sessionId) {
+    formData.append('session_id', sessionId);
+  }
+
+  if (conversationId) {
+    formData.append('conversation_id', conversationId);
   }
 
   if (audioBlob) {

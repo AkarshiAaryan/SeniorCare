@@ -51,10 +51,10 @@ def test_voice_proactive_check_and_trigger(client):
     assert check_empty.status_code == 200
     assert check_empty.json()["has_proactive_prompt"] is False
 
-    # Trigger proactive prompt (Medication Due)
+    # Trigger proactive prompt (Medication Due) - Button 1
     trig_res = client.post("/voice/proactive-trigger", json={
         "user_id": user_id,
-        "reason_type": "medication_due",
+        "reason_type": "MEDICATION_DUE",
         "details": "Lisinopril 10mg"
     })
     assert trig_res.status_code == 200
@@ -64,10 +64,17 @@ def test_voice_proactive_check_and_trigger(client):
     assert "Lisinopril" in trig_data["text"]
     assert len(trig_data["audio_base64"]) > 0
 
-    # Query proactive check (should find the pending event)
-    check_pending = client.get(f"/voice/proactive-check/{user_id}")
-    assert check_pending.status_code == 200
-    assert check_pending.json()["has_proactive_prompt"] is True
+    # Trigger proactive prompt (3-Hour Check-in) - Button 2
+    trig_checkin = client.post("/voice/proactive-trigger", json={
+        "user_id": user_id,
+        "reason_type": "CHECK_IN_DUE",
+        "details": "3-Hour Daytime Wellness Check"
+    })
+    assert trig_checkin.status_code == 200
+    checkin_data = trig_checkin.json()
+    assert checkin_data["has_proactive_prompt"] is True
+    assert "Patrick" in checkin_data["text"]
+    assert len(checkin_data["audio_base64"]) > 0
 
 
 def test_voice_process_turn_nonexistent_user(client):

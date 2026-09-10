@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Mic, MicOff, Volume2, X, Send, Sparkles, AlertCircle, Activity, Radio, VolumeX } from 'lucide-react';
-import { processAudioTurn, processVoiceTurn, playRimeAudio, stopRimeAudio, getPrecomputedGreeting } from '../services/api';
+import { processAudioTurn, processVoiceTurn, playRimeAudio, stopRimeAudio, initVoiceSession } from '../services/api';
 
 /**
  * Authoritative Conversational State Machine Enum
@@ -28,7 +28,14 @@ function calculateOverlapRatio(textA, textB) {
   return matches.length / tokensA.length;
 }
 
-export default function VoiceModal({ isOpen, onClose, user, onUpdate, initialAssistantText, initialAudioBase64 }) {
+export default function VoiceModal({ 
+  isOpen, 
+  onClose, 
+  user, 
+  onUpdate,
+  initialAssistantText,
+  initialAudioBase64
+}) {
   // Authoritative conversational state
   const [voiceState, setVoiceState] = useState(VOICE_STATE.IDLE);
   const [liveTranscript, setLiveTranscript] = useState('');
@@ -39,9 +46,12 @@ export default function VoiceModal({ isOpen, onClose, user, onUpdate, initialAss
   const [customText, setCustomText] = useState('');
   const [statusMessage, setStatusMessage] = useState('Elena is ready. Speak naturally.');
 
-  // References for Fencing, Generations, and Media Streams
+  // References for Session, Fencing, Generations, and Media Streams
+  const isSessionInitializedRef = useRef(false);
+  const sessionIdRef = useRef(null);
+  const conversationIdRef = useRef(null);
+  const historyRef = useRef([]);
   const voiceStateRef = useRef(VOICE_STATE.IDLE);
-  const sessionIdRef = useRef(0);
   const turnIdRef = useRef(null);
   const recognitionGenerationRef = useRef(0);
   const playbackGenerationRef = useRef(0);
@@ -249,7 +259,15 @@ export default function VoiceModal({ isOpen, onClose, user, onUpdate, initialAss
     setStatusMessage('Elena is thinking and preparing response...');
 
     try {
-      const result = await processVoiceTurn(user.id, userSpokenText, history, assignedTurnId);
+      const currentHistory = historyRef.current.length > 0 ? historyRef.current : history;
+      const result = await processVoiceTurn(
+        user.id, 
+        userSpokenText, 
+        currentHistory, 
+        assignedTurnId, 
+        sessionIdRef.current, 
+        conversationIdRef.current
+      );
 
       // Check for turn fencing and stale response
       if (turnIdRef.current !== assignedTurnId || result.stale || voiceStateRef.current === VOICE_STATE.IDLE) {
@@ -264,9 +282,15 @@ export default function VoiceModal({ isOpen, onClose, user, onUpdate, initialAss
         return;
       }
 
+      if (result.session_id) sessionIdRef.current = result.session_id;
+      if (result.conversation_id) conversationIdRef.current = result.conversation_id;
+      if (result.history) {
+        historyRef.current = result.history;
+        setHistory(result.history);
+      }
+
       setAssistantText(result.assistant_text);
       setCurrentAudioBase64(result.audio_base64 || null);
-      setHistory(result.history);
       currentAssistantSpeechRef.current = result.assistant_text;
 
       // Transition to Assistant Speaking
@@ -309,60 +333,79 @@ export default function VoiceModal({ isOpen, onClose, user, onUpdate, initialAss
     await commitUserTurn(text.trim());
   }, [customText, cancelAssistantPlayback, commitUserTurn]);
 
-  // Modal Lifecycle Initialization & Cleanup
+  // Modal Lifecycle Initialization & Cleanup with Server-Authoritative Session
   useEffect(() => {
     isMountedRef.current = true;
 
-    if (isOpen) {
-      sessionIdRef.current++;
-      const fallbackText = initialAssistantText || `Hello ${user?.name || 'Friend'}! I am Elena, your voice care assistant. How are you feeling today?`;
+    if (isOpen && user?.id) {
+      if (!isSessionInitializedRef.current) {
+        isSessionInitializedRef.current = true;
 
-      const launchGreeting = (textToSpeak, audioToPlay) => {
-        if (!isMountedRef.current || !isOpen) return;
-        setAssistantText(textToSpeak);
-        setCurrentAudioBase64(audioToPlay || null);
-        setHistory([{ role: 'assistant', content: textToSpeak }]);
-        currentAssistantSpeechRef.current = textToSpeak;
+        initVoiceSession(user.id, 'initial_greeting', false)
+          .then((sessionData) => {
+            if (!isMountedRef.current || !isOpen) return;
 
-        transitionTo(VOICE_STATE.ASSISTANT_SPEAKING, 'SESSION_OPEN_GREETING', textToSpeak);
-        setStatusMessage('Elena is speaking. Listen or start talking when ready.');
+            sessionIdRef.current = sessionData.session_id;
+            conversationIdRef.current = sessionData.conversation_id;
 
-        const playGen = ++playbackGenerationRef.current;
-        playRimeAudio(audioToPlay || null, textToSpeak, () => {
-          if (playbackGenerationRef.current === playGen && voiceStateRef.current === VOICE_STATE.ASSISTANT_SPEAKING) {
-            currentAssistantSpeechRef.current = '';
+            if (sessionData.history && sessionData.history.length > 0) {
+              historyRef.current = sessionData.history;
+              setHistory(sessionData.history);
+            }
+
+            const hasExplicitProactivePrompt = Boolean(initialAssistantText || initialAudioBase64);
+            const shouldPlayGreeting = hasExplicitProactivePrompt || (sessionData.greeting_needed && sessionData.greeting);
+
+            if (shouldPlayGreeting) {
+              const greetingText = initialAssistantText || sessionData.greeting?.spoken_text || sessionData.greeting?.text || `Hello ${user?.name || 'Friend'}! How are you feeling today?`;
+              const greetingAudio = initialAudioBase64 || sessionData.greeting?.audio_base64;
+
+              setAssistantText(greetingText);
+              setCurrentAudioBase64(greetingAudio || null);
+              currentAssistantSpeechRef.current = greetingText;
+
+              transitionTo(VOICE_STATE.ASSISTANT_SPEAKING, hasExplicitProactivePrompt ? 'SIMULATE_PROACTIVE_GREETING' : 'SESSION_OPEN_GREETING', greetingText);
+              setStatusMessage('Elena is speaking. Listen or start talking when ready.');
+
+              const playGen = ++playbackGenerationRef.current;
+              playRimeAudio(greetingAudio || null, greetingText, () => {
+                if (playbackGenerationRef.current === playGen && voiceStateRef.current === VOICE_STATE.ASSISTANT_SPEAKING) {
+                  currentAssistantSpeechRef.current = '';
+                  startListeningLoop();
+                }
+              }, playGen).catch((e) => {
+                console.warn('Initial autoplay note:', e);
+                startListeningLoop();
+              });
+            } else {
+              // Continuing active session / conversation without re-greeting
+              if (sessionData.history && sessionData.history.length > 0) {
+                const lastAssistantMsg = [...sessionData.history].reverse().find(m => m.role === 'assistant');
+                if (lastAssistantMsg) {
+                  setAssistantText(lastAssistantMsg.content);
+                }
+              }
+              startListeningLoop();
+            }
+          })
+          .catch((err) => {
+            console.error('Failed to init voice session:', err);
             startListeningLoop();
-          }
-        }, playGen).catch(e => {
-          console.warn('Initial autoplay note:', e);
-          startListeningLoop();
-        });
-      };
-
-      if (!initialAudioBase64 && user?.id) {
-        getPrecomputedGreeting(user.id).then(greeting => {
-          if (greeting && greeting.audio_base64) {
-            launchGreeting(greeting.spoken_text || greeting.text, greeting.audio_base64);
-          } else {
-            launchGreeting(fallbackText, null);
-          }
-        }).catch(() => {
-          launchGreeting(fallbackText, null);
-        });
-      } else {
-        launchGreeting(fallbackText, initialAudioBase64);
+          });
       }
-    } else {
+    } else if (!isOpen) {
+      isSessionInitializedRef.current = false;
       cleanupHardware();
       voiceStateRef.current = VOICE_STATE.IDLE;
       setVoiceState(VOICE_STATE.IDLE);
+      currentAssistantSpeechRef.current = '';
     }
 
     return () => {
       isMountedRef.current = false;
       cleanupHardware();
     };
-  }, [isOpen, user, initialAssistantText, initialAudioBase64, transitionTo, startListeningLoop, cleanupHardware]);
+  }, [isOpen, user?.id, initialAssistantText, initialAudioBase64, transitionTo, startListeningLoop, cleanupHardware]);
 
   if (!isOpen) return null;
 
@@ -382,7 +425,7 @@ export default function VoiceModal({ isOpen, onClose, user, onUpdate, initialAss
                   {voiceState}
                 </span>
               </div>
-              <p className="text-xs text-emerald-100 font-medium">Hands-Free Continuous Voice • Zero Echo Safe</p>
+              <p className="text-xs text-emerald-100 font-medium">Hands-Free Continuous Voice • Echo Safe</p>
             </div>
           </div>
           <button
