@@ -104,6 +104,17 @@ DEFAULT_CANONICAL_RESPONSES: Dict[Tuple[str, str], str] = {
     ),
     ("general_followup", "pain_present"): (
         "Thank you for letting me know, {user_name}. Please take good care of yourself and rest."
+    ),
+
+    # Proactive Precomputed Greetings
+    ("proactive_greeting", "initial_greeting"): (
+        "Hello {user_name}! I am Elena, your voice care assistant. How are you feeling today?"
+    ),
+    ("proactive_greeting", "3_hour_checkin"): (
+        "Hello {user_name}! Elena here for your check-in. How are you feeling right now?"
+    ),
+    ("proactive_greeting", "medication_due"): (
+        "Hello {user_name}! Elena here with a quick reminder for your scheduled medicine. Have you taken your dose yet?"
     )
 }
 

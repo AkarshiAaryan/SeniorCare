@@ -14,6 +14,7 @@ from app.services.llm_agent import llm_agent
 from app.services.voice_orchestrator import voice_orchestrator
 from app.services.voice_prefetcher import voice_prefetcher
 from app.services.rime_voice_cache import rime_voice_cache
+from app.services.proactive_greeting import proactive_greeting_service
 from app import models
 
 logger = logging.getLogger("VoiceRouter")
@@ -66,12 +67,24 @@ class PrefetchRequest(BaseModel):
 
 class ProactiveCheckResponse(BaseModel):
     has_proactive_prompt: bool
+    prompt_needed: Optional[bool] = None
     prompt_type: Optional[str] = None
     text: Optional[str] = None
+    spoken_text: Optional[str] = None
     audio_base64: Optional[str] = None
     audio_format: Optional[str] = "audio/mpeg"
     event_id: Optional[int] = None
     timestamp: Optional[str] = None
+    turn_id: Optional[str] = None
+    turn_source: Optional[str] = None
+    audio_source: Optional[str] = None
+    context_state: Optional[str] = None
+
+
+class GreetingRequest(BaseModel):
+    user_id: int
+    greeting_type: Optional[str] = "initial_greeting"
+    details: Optional[str] = None
 
 
 class ProactiveTriggerRequest(BaseModel):
@@ -248,11 +261,56 @@ async def clear_voice_cache():
     return {"status": "success", "cleared_entries": cleared}
 
 
+@router.get("/greeting/{user_id}")
+async def get_user_greeting(
+    user_id: int,
+    greeting_type: str = "initial_greeting",
+    details: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    """
+    Returns precomputed, cached Rime audio greeting for a user.
+    Bypasses LLM entirely to prevent voice mismatch, provide deterministic tone, and reduce latency.
+    """
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    greeting = await proactive_greeting_service.get_or_precompute_greeting(
+        user_id=user.id,
+        user_name=user.name,
+        greeting_type=greeting_type,
+        details=details
+    )
+    return greeting
+
+
+@router.post("/greeting")
+async def post_user_greeting(
+    req: GreetingRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    POST variant to retrieve precomputed Rime audio greeting.
+    """
+    user = db.query(models.User).filter(models.User.id == req.user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    greeting = await proactive_greeting_service.get_or_precompute_greeting(
+        user_id=user.id,
+        user_name=user.name,
+        greeting_type=req.greeting_type or "initial_greeting",
+        details=req.details
+    )
+    return greeting
+
+
 @router.get("/proactive-check/{user_id}", response_model=ProactiveCheckResponse)
 async def check_proactive_outreach(user_id: int, db: Session = Depends(get_db)):
     """
     Polls for automated proactive voice outreach events (Medication Due or 3-Hour Interval Check-in).
-    When due, synthesizes a natural, empathetic spoken opening via LLM + Rime TTS.
+    When due, retrieves precomputed Rime audio greeting without invoking LLM dynamically.
     """
     user = db.query(models.User).filter(models.User.id == user_id).first()
     if not user:
@@ -265,24 +323,17 @@ async def check_proactive_outreach(user_id: int, db: Session = Depends(get_db)):
     ).order_by(models.EventLog.timestamp.asc()).first()
 
     if not pending_event:
-        return ProactiveCheckResponse(has_proactive_prompt=False)
+        return ProactiveCheckResponse(has_proactive_prompt=False, prompt_needed=False)
 
     reason_type = "medication_due" if pending_event.event_type == "MEDICATION_DUE" else "3_hour_checkin"
-    current_hour = datetime.now().hour
-    time_of_day = "Morning" if current_hour < 12 else ("Afternoon" if current_hour < 18 else "Evening")
 
-    # Generate natural proactive spoken opening with LLM
-    proactive_text = await llm_agent.generate_proactive_outreach(
+    # Retrieve precomputed Rime greeting
+    greeting = await proactive_greeting_service.get_or_precompute_greeting(
+        user_id=user.id,
         user_name=user.name,
-        user_age=user.age,
-        reason_type=reason_type,
-        details=pending_event.message,
-        time_of_day=time_of_day
+        greeting_type=reason_type,
+        details=pending_event.message
     )
-
-    # Synthesize audio with Rime TTS
-    audio_bytes = await rime_service.synthesize(proactive_text)
-    audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
 
     # Trigger background prefetch for senior's anticipated response
     target_state = "medication_check" if reason_type == "medication_due" else "wellness_check"
@@ -294,10 +345,16 @@ async def check_proactive_outreach(user_id: int, db: Session = Depends(get_db)):
 
     return ProactiveCheckResponse(
         has_proactive_prompt=True,
+        prompt_needed=True,
         prompt_type=reason_type,
-        text=proactive_text,
-        audio_base64=audio_b64,
+        text=greeting["text"],
+        spoken_text=greeting["spoken_text"],
+        audio_base64=greeting["audio_base64"],
         audio_format="audio/mpeg",
+        turn_id=greeting["turn_id"],
+        turn_source=greeting["turn_source"],
+        audio_source=greeting["audio_source"],
+        context_state=greeting["context_state"],
         event_id=pending_event.id,
         timestamp=pending_event.timestamp.isoformat()
     )
@@ -307,6 +364,7 @@ async def check_proactive_outreach(user_id: int, db: Session = Depends(get_db)):
 async def trigger_proactive_prompt(req: ProactiveTriggerRequest, db: Session = Depends(get_db)):
     """
     Simulates or forces a proactive outreach trigger (for testing 3-hour check-ins or medication times).
+    Uses precomputed Rime audio greeting without invoking LLM dynamically.
     """
     user = db.query(models.User).filter(models.User.id == req.user_id).first()
     if not user:
@@ -328,18 +386,13 @@ async def trigger_proactive_prompt(req: ProactiveTriggerRequest, db: Session = D
     db.commit()
     db.refresh(event)
 
-    # Generate LLM speech
-    proactive_text = await llm_agent.generate_proactive_outreach(
+    # Retrieve precomputed Rime greeting
+    greeting = await proactive_greeting_service.get_or_precompute_greeting(
+        user_id=user.id,
         user_name=user.name,
-        user_age=user.age,
-        reason_type=req.reason_type,
-        details=req.details or "Prescription dose",
-        time_of_day=time_of_day
+        greeting_type=req.reason_type,
+        details=req.details or "Prescription dose"
     )
-
-    # Synthesize audio with Rime TTS
-    audio_bytes = await rime_service.synthesize(proactive_text)
-    audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
 
     # Trigger background prefetch for senior's anticipated response
     target_state = "medication_check" if req.reason_type == "medication_due" else "wellness_check"
@@ -351,10 +404,16 @@ async def trigger_proactive_prompt(req: ProactiveTriggerRequest, db: Session = D
 
     return ProactiveCheckResponse(
         has_proactive_prompt=True,
+        prompt_needed=True,
         prompt_type=req.reason_type,
-        text=proactive_text,
-        audio_base64=audio_b64,
+        text=greeting["text"],
+        spoken_text=greeting["spoken_text"],
+        audio_base64=greeting["audio_base64"],
         audio_format="audio/mpeg",
+        turn_id=greeting["turn_id"],
+        turn_source=greeting["turn_source"],
+        audio_source=greeting["audio_source"],
+        context_state=greeting["context_state"],
         event_id=event.id,
         timestamp=event.timestamp.isoformat()
     )

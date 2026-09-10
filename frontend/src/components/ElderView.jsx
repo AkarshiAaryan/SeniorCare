@@ -21,7 +21,8 @@ import {
   getDailyReport, 
   playRimeAudio,
   checkProactiveVoiceOutreach,
-  triggerProactivePrompt
+  triggerProactivePrompt,
+  getPrecomputedGreeting
 } from '../services/api';
 import VoiceModal from './VoiceModal';
 
@@ -36,6 +37,21 @@ export default function ElderView({ user, onRefresh }) {
   const [initialAudioBase64, setInitialAudioBase64] = useState(null);
   const [isTriggeringProactive, setIsTriggeringProactive] = useState(false);
   const handledEventIdsRef = useRef(new Set());
+
+  const handleOpenVoice = async (greetingType = 'initial_greeting', details = '') => {
+    if (user?.id) {
+      try {
+        const greeting = await getPrecomputedGreeting(user.id, greetingType, details);
+        if (greeting) {
+          setInitialAssistantText(greeting.spoken_text || greeting.text);
+          setInitialAudioBase64(greeting.audio_base64);
+        }
+      } catch (e) {
+        console.warn('Precomputed greeting fetch note:', e);
+      }
+    }
+    setIsVoiceOpen(true);
+  };
 
   const loadData = async () => {
     if (!user) return;
@@ -146,7 +162,7 @@ export default function ElderView({ user, onRefresh }) {
 
         {/* Big Voice Button */}
         <button
-          onClick={() => setIsVoiceOpen(true)}
+          onClick={() => handleOpenVoice('initial_greeting')}
           className="px-8 py-5 bg-white text-emerald-800 hover:bg-emerald-50 rounded-2xl shadow-lg hover:shadow-2xl font-black text-2xl flex items-center gap-4 transition-all duration-300 transform hover:scale-105 active:scale-95 group"
         >
           <div className="w-12 h-12 rounded-full bg-emerald-600 text-white flex items-center justify-center group-hover:bg-emerald-700 transition">

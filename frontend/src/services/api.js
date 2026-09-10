@@ -173,6 +173,14 @@ export async function processAudioTurn(userId, audioBlob, history = [], textInpu
   return res.json();
 }
 
+export async function getPrecomputedGreeting(userId, greetingType = 'initial_greeting', details = '') {
+  const params = new URLSearchParams({ greeting_type: greetingType });
+  if (details) params.append('details', details);
+  const res = await fetch(`${API_BASE}/voice/greeting/${userId}?${params.toString()}`);
+  if (!res.ok) return null;
+  return res.json();
+}
+
 export async function checkProactiveVoiceOutreach(userId) {
   const res = await fetch(`${API_BASE}/voice/proactive-check/${userId}`);
   if (!res.ok) return { has_proactive_prompt: false };

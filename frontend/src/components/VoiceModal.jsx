@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Mic, MicOff, Volume2, X, Send, Sparkles, AlertCircle, Activity, Radio, VolumeX } from 'lucide-react';
-import { processAudioTurn, processVoiceTurn, playRimeAudio, stopRimeAudio } from '../services/api';
+import { processAudioTurn, processVoiceTurn, playRimeAudio, stopRimeAudio, getPrecomputedGreeting } from '../services/api';
 
 /**
  * Authoritative Conversational State Machine Enum
@@ -315,25 +315,43 @@ export default function VoiceModal({ isOpen, onClose, user, onUpdate, initialAss
 
     if (isOpen) {
       sessionIdRef.current++;
-      const initialText = initialAssistantText || `Hello ${user?.name || 'Friend'}! I am Elena. How are you feeling today?`;
-      setAssistantText(initialText);
-      setCurrentAudioBase64(initialAudioBase64 || null);
-      setHistory([{ role: 'assistant', content: initialText }]);
-      currentAssistantSpeechRef.current = initialText;
+      const fallbackText = initialAssistantText || `Hello ${user?.name || 'Friend'}! I am Elena, your voice care assistant. How are you feeling today?`;
 
-      transitionTo(VOICE_STATE.ASSISTANT_SPEAKING, 'SESSION_OPEN_GREETING', initialText);
-      setStatusMessage('Elena is speaking. Listen or start talking when ready.');
+      const launchGreeting = (textToSpeak, audioToPlay) => {
+        if (!isMountedRef.current || !isOpen) return;
+        setAssistantText(textToSpeak);
+        setCurrentAudioBase64(audioToPlay || null);
+        setHistory([{ role: 'assistant', content: textToSpeak }]);
+        currentAssistantSpeechRef.current = textToSpeak;
 
-      const playGen = ++playbackGenerationRef.current;
-      playRimeAudio(initialAudioBase64 || null, initialText, () => {
-        if (playbackGenerationRef.current === playGen && voiceStateRef.current === VOICE_STATE.ASSISTANT_SPEAKING) {
-          currentAssistantSpeechRef.current = '';
+        transitionTo(VOICE_STATE.ASSISTANT_SPEAKING, 'SESSION_OPEN_GREETING', textToSpeak);
+        setStatusMessage('Elena is speaking. Listen or start talking when ready.');
+
+        const playGen = ++playbackGenerationRef.current;
+        playRimeAudio(audioToPlay || null, textToSpeak, () => {
+          if (playbackGenerationRef.current === playGen && voiceStateRef.current === VOICE_STATE.ASSISTANT_SPEAKING) {
+            currentAssistantSpeechRef.current = '';
+            startListeningLoop();
+          }
+        }, playGen).catch(e => {
+          console.warn('Initial autoplay note:', e);
           startListeningLoop();
-        }
-      }, playGen).catch(e => {
-        console.warn('Initial autoplay note:', e);
-        startListeningLoop();
-      });
+        });
+      };
+
+      if (!initialAudioBase64 && user?.id) {
+        getPrecomputedGreeting(user.id).then(greeting => {
+          if (greeting && greeting.audio_base64) {
+            launchGreeting(greeting.spoken_text || greeting.text, greeting.audio_base64);
+          } else {
+            launchGreeting(fallbackText, null);
+          }
+        }).catch(() => {
+          launchGreeting(fallbackText, null);
+        });
+      } else {
+        launchGreeting(fallbackText, initialAudioBase64);
+      }
     } else {
       cleanupHardware();
       voiceStateRef.current = VOICE_STATE.IDLE;
